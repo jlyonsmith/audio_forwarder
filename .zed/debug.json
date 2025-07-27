@@ -1,0 +1,18 @@
+// Project-local debug tasks
+//
+// For more documentation on how to configure debug tasks,
+// see: https://zed.dev/docs/debugger
+[
+  {
+    "label": "Debug audio-forwarder",
+    "adapter": "CodeLLDB",
+    "request": "launch",
+    "program": "target/debug/audio-forwarder",
+    "args": ["--help"],
+    "build": {
+      "command": "cargo",
+      "args": ["build"]
+    },
+    "cwd": "$ZED_WORKTREE_ROOT"
+  }
+]
