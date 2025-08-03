@@ -1,5 +1,6 @@
-use core::fmt::Arguments;
 use audio_forwarder::{error, AudioForwarderLog, AudioForwarderTool};
+use core::fmt::Arguments;
+use std::sync::Arc;
 use termion::color;
 
 struct AudioForwarderLogger;
@@ -23,9 +24,9 @@ impl AudioForwarderLog for AudioForwarderLogger {
 }
 
 fn main() {
-    let logger = AudioForwarderLogger::new();
+    let logger = Arc::new(AudioForwarderLogger::new());
 
-    if let Err(error) = AudioForwarderTool::new(&logger).run(std::env::args_os()) {
+    if let Err(error) = AudioForwarderTool::new(logger.clone()).run(std::env::args_os()) {
         error!(logger, "{}", error);
         std::process::exit(1);
     }

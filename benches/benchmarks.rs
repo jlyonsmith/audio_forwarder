@@ -1,6 +1,7 @@
+use audio_forwarder::*;
 use core::fmt::Arguments;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use audio_forwarder::*;
+use std::sync::Arc;
 
 fn benchmark_1(arg: &str) {
     struct TestLogger;
@@ -18,7 +19,7 @@ fn benchmark_1(arg: &str) {
     }
 
     let logger = TestLogger::new();
-    let mut tool = AudioForwarderTool::new(&logger);
+    let mut tool = AudioForwarderTool::new(Arc::new(logger));
     let args: Vec<std::ffi::OsString> = vec!["".into(), arg.into()];
 
     tool.run(args).unwrap();
