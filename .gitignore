@@ -1,4 +1,4 @@
-/target
-/scratch
-/.vscode
-.zed/
+**/target
+**/scratch
+**/.vscode
+**/.zed/

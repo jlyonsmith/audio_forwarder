@@ -23,10 +23,14 @@ impl AudioForwarderLog for AudioForwarderLogger {
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let logger = Arc::new(AudioForwarderLogger::new());
 
-    if let Err(error) = AudioForwarderTool::new(logger.clone()).run(std::env::args_os()) {
+    if let Err(error) = AudioForwarderTool::new(logger.clone())
+        .run(std::env::args_os())
+        .await
+    {
         error!(logger, "{}", error);
         std::process::exit(1);
     }

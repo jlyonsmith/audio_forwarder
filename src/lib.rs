@@ -8,16 +8,17 @@ use cpal::{
     Device, FromSample, InputCallbackInfo, OutputCallbackInfo, Sample, SampleFormat, SizedSample,
     SupportedStreamConfig, SupportedStreamConfigRange,
 };
-use ctrlc;
-use simple_cancelation_token::CancelationToken;
+use dasp_sample::ToSample;
 use std::{
     collections::VecDeque,
-    io::ErrorKind,
-    net::{SocketAddr, UdpSocket},
+    net::SocketAddr,
     sync::{Arc, Mutex},
-    time::Duration,
 };
 use termion::color;
+use tokio::{net::UdpSocket, select, signal, sync::Notify};
+
+// TODO @john: Make this configurable
+const MTU: usize = 65536;
 
 pub trait AudioForwarderLog: Send + Sync {
     fn output(self: &Self, args: Arguments);
@@ -122,10 +123,6 @@ struct SendArgs {
     /// The IP address and port to send audio to
     #[arg(long = "addr")]
     sock_addr: SocketAddr,
-
-    /// Convert mono audio to stereo audio before sending
-    #[arg(long = "mono-to-stereo")]
-    mono_to_stereo: bool,
 }
 
 impl<'a> AudioForwarderTool {
@@ -133,7 +130,7 @@ impl<'a> AudioForwarderTool {
         AudioForwarderTool { log }
     }
 
-    pub fn run(
+    pub async fn run(
         self: &mut Self,
         args: impl IntoIterator<Item = std::ffi::OsString>,
     ) -> Result<(), anyhow::Error> {
@@ -156,17 +153,31 @@ impl<'a> AudioForwarderTool {
                     args.stream_config,
                 )?;
 
+                output!(
+                    self.log,
+                    "Receiving audio from {} to {} -> {} -> {} channel{} at {} Hz",
+                    args.sock_addr,
+                    args.host_name,
+                    device.name().unwrap_or("Unknown".to_string()),
+                    config.channels(),
+                    if config.channels() == 1 { "" } else { "s" },
+                    config.sample_rate().0,
+                );
+
                 match config.sample_format() {
                     SampleFormat::F32 => {
-                        self.receive_audio::<f32>(&args.sock_addr, &device, &config)?
+                        self.receive_audio::<f32>(&args.sock_addr, &device, &config)
+                            .await?
                     }
                     SampleFormat::I16 => {
-                        self.receive_audio::<i16>(&args.sock_addr, &device, &config)?
+                        self.receive_audio::<i16>(&args.sock_addr, &device, &config)
+                            .await?
                     }
                     SampleFormat::U16 => {
-                        self.receive_audio::<u16>(&args.sock_addr, &device, &config)?
+                        self.receive_audio::<u16>(&args.sock_addr, &device, &config)
+                            .await?
                     }
-                    _ => panic!("Unsupported sample format"),
+                    _ => panic!("Unsupported sample format on output device"),
                 }
             }
             Commands::Send(args) => {
@@ -176,17 +187,31 @@ impl<'a> AudioForwarderTool {
                     args.stream_config,
                 )?;
 
+                output!(
+                    self.log,
+                    "Sending audio from {} -> {} -> {} channel{} at {} Hz to {}",
+                    args.host_name,
+                    device.name().unwrap_or("Unknown".to_string()),
+                    config.channels(),
+                    if config.channels() == 1 { "" } else { "s" },
+                    config.sample_rate().0,
+                    args.sock_addr,
+                );
+
                 match config.sample_format() {
                     SampleFormat::F32 => {
-                        self.send_audio::<f32>(&args.sock_addr, &device, &config)?
+                        self.send_audio::<f32>(&args.sock_addr, &device, &config)
+                            .await?
                     }
                     SampleFormat::I16 => {
-                        self.send_audio::<i16>(&args.sock_addr, &device, &config)?
+                        self.send_audio::<i16>(&args.sock_addr, &device, &config)
+                            .await?
                     }
                     SampleFormat::U16 => {
-                        self.send_audio::<u16>(&args.sock_addr, &device, &config)?
+                        self.send_audio::<u16>(&args.sock_addr, &device, &config)
+                            .await?
                     }
-                    _ => panic!("Unsupported sample format"),
+                    _ => panic!("Unsupported sample format on input device"),
                 }
             }
         }
@@ -288,7 +313,7 @@ impl<'a> AudioForwarderTool {
         Ok((device, config))
     }
 
-    pub fn receive_audio<T>(
+    pub async fn receive_audio<T>(
         &self,
         sock_addr: &std::net::SocketAddr,
         device: &Device,
@@ -299,14 +324,27 @@ impl<'a> AudioForwarderTool {
     {
         let config = supported_config.config();
         let channels = supported_config.channels() as usize;
+        // TODO @john: Make audio buffer size configurable
         let audio_buffer: Arc<Mutex<VecDeque<f32>>> =
-            Arc::new(Mutex::new(VecDeque::with_capacity(8192 * channels)));
-        let log_clone = self.log.clone();
+            Arc::new(Mutex::new(VecDeque::with_capacity(120000 * channels)));
         let audio_buffer_clone = audio_buffer.clone();
+        let log_clone = self.log.clone();
+        let mut packet_buffer = vec![0u8; MTU];
+        let socket = UdpSocket::bind(sock_addr)
+            .await
+            .context("Failed to bind UDP socket")?;
         let stream = device.build_output_stream(
             &config,
             move |output: &mut [T], _: &OutputCallbackInfo| {
                 let mut audio_buffer = audio_buffer_clone.lock().unwrap();
+
+                if audio_buffer.len() > 0 {
+                    eprintln!(
+                        "Audio buffer length {} ({}%)",
+                        audio_buffer.len(),
+                        audio_buffer.len() as f32 / audio_buffer.capacity() as f32 * 100.0
+                    );
+                }
 
                 for sample in output.iter_mut() {
                     if let Some(value) = audio_buffer.pop_front() {
@@ -322,80 +360,80 @@ impl<'a> AudioForwarderTool {
             None,
         )?;
 
-        let mut packet_buffer = vec![0u8; 65536];
-        let socket = UdpSocket::bind(sock_addr).context("Failed to bind UDP socket")?;
-
-        socket.set_read_timeout(Some(Duration::from_millis(1000)))?;
-
-        let token = CancelationToken::new();
-        let token_clone = token.clone();
-        let log_clone = self.log.clone();
-
-        ctrlc::set_handler(move || {
-            output!(log_clone, "\nStopping...");
-            token_clone.cancel();
-            ()
-        })?;
-
-        let mut last_sequence_number = 0u64;
+        let sequence_number: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
+        let mut packet_length = 0;
 
         stream.play()?;
 
-        output!(self.log, "Receiving audio on address {}", sock_addr);
-
         loop {
-            match socket.recv_from(&mut packet_buffer) {
-                Ok((_len, _addr)) => {}
-                Err(e) => match e.kind() {
-                    ErrorKind::WouldBlock => {}
-                    other_error => {
-                        error!(self.log, "Failed to receive audio packet - {}", other_error);
+            select! {
+                socket_result = socket.recv_from(&mut packet_buffer) => {
+                    match socket_result {
+                        Ok((len, _addr)) => {
+                            packet_length = len;
+                        }
+                        Err(e) => error!(self.log, "Failed to receive audio packet - {}", e)
                     }
-                },
-            }
-
-            if token.is_canceled() {
-                break;
-            }
-
-            let sequence_number;
-
-            if packet_buffer.len() >= size_of::<u64>() {
-                sequence_number =
-                    u64::from_le_bytes(packet_buffer[..size_of::<u64>()].try_into().unwrap());
-            } else {
-                // Packet too small
-                continue;
-            }
-
-            if sequence_number <= last_sequence_number {
-                // Out of sequence packet
-                continue;
-            }
-
-            last_sequence_number = sequence_number;
-
-            // Extract audio data
-            let audio_data = &packet_buffer[size_of::<u64>()..];
-
-            // Convert bytes to samples
-            if audio_data.len() % size_of::<f32>() != 0 {
-                // Audio data length not divisible by sample size
-                continue;
+                }
+                _ = signal::ctrl_c() => {
+                    output!(self.log, "\nStopping...");
+                    break;
+                }
             }
 
             {
-                let mut audio_buffer = audio_buffer.lock().unwrap();
-                let chunks = audio_data.chunks_exact(size_of::<f32>());
+                let mut sequence_number = sequence_number.lock().unwrap();
+                let next_sequence_number;
 
-                // Prevent buffer overflow
-                while audio_buffer.len() + chunks.len() > audio_buffer.capacity() {
-                    audio_buffer.pop_front();
+                if packet_length >= size_of::<u64>() {
+                    next_sequence_number =
+                        u64::from_le_bytes(packet_buffer[..size_of::<u64>()].try_into().unwrap());
+                } else {
+                    // Packet too small
+                    eprintln!("Audio packet too small");
+                    continue;
                 }
 
-                for chunk in chunks {
-                    let sample = f32::from_le_bytes(chunk.try_into().unwrap());
-                    audio_buffer.push_back(sample);
+                if next_sequence_number <= *sequence_number {
+                    eprintln!("Audio data length not divisible by sample size");
+                    continue;
+                }
+
+                *sequence_number = next_sequence_number;
+                eprintln!(
+                    "Received packet {}, packet size: {}",
+                    next_sequence_number, packet_length,
+                );
+
+                // Extract audio data
+                let audio_data = &packet_buffer[size_of::<u64>()..packet_length];
+
+                // Convert bytes to samples
+                if audio_data.len() % size_of::<f32>() != 0 {
+                    // Audio data length not divisible by sample size
+                    eprintln!("Audio data length not divisible by 4 bytes");
+                    continue;
+                }
+
+                {
+                    let mut audio_buffer = audio_buffer.lock().unwrap();
+                    let audio_data_chunks = audio_data.chunks_exact(size_of::<f32>());
+                    let mut audio_buffer_shrunk = false;
+
+                    // Prevent buffer overflow
+                    while audio_buffer.len() + audio_data_chunks.len() > audio_buffer.capacity() {
+                        audio_buffer.pop_front();
+                        audio_buffer_shrunk = true;
+                    }
+
+                    if audio_buffer_shrunk {
+                        eprintln!("Audio buffer shrunk - audio lost");
+                    }
+
+                    for chunk in audio_data_chunks {
+                        let sample = f32::from_le_bytes(chunk.try_into().unwrap());
+                        audio_buffer.push_back(sample);
+                    }
                 }
             }
         }
@@ -403,108 +441,108 @@ impl<'a> AudioForwarderTool {
         Ok(())
     }
 
-    pub fn send_audio<T>(
+    pub async fn send_audio<T>(
         &self,
         sock_addr: &std::net::SocketAddr,
         device: &Device,
         supported_config: &SupportedStreamConfig,
     ) -> Result<(), anyhow::Error>
     where
-        T: SizedSample + FromSample<f32>,
+        T: SizedSample + Sample + ToSample<f32>,
     {
         let config = supported_config.config();
         let channels = supported_config.channels() as usize;
+        // TODO @john: Make configurable
         let audio_buffer: Arc<Mutex<VecDeque<f32>>> =
-            Arc::new(Mutex::new(VecDeque::with_capacity(8192 * channels)));
-        let log_clone = self.log.clone();
+            Arc::new(Mutex::new(VecDeque::with_capacity(10000 * channels)));
         let audio_buffer_clone = audio_buffer.clone();
+        let log_clone1 = self.log.clone();
+        let socket = UdpSocket::bind("0.0.0.0:0")
+            .await
+            .context("Failed to bind UDP socket and port")?;
+        let mut sequence_number = 0u64;
+        let notify = Arc::new(Notify::new());
+        let notify_clone = notify.clone();
+        let mut packet_buffer = Vec::with_capacity(MTU);
         let stream = device.build_input_stream(
             &config,
             move |input: &[T], _: &InputCallbackInfo| {
-                let mut _audio_buffer = audio_buffer_clone.lock().unwrap();
+                let mut audio_buffer = audio_buffer_clone.lock().unwrap();
+                let mut audio_buffer_shrunk = false;
 
-                for _sample in input.iter() {}
+                // Prevent buffer overflow
+                while audio_buffer.len() + input.len() > audio_buffer.capacity() {
+                    audio_buffer.pop_front();
+                    audio_buffer_shrunk = true;
+                }
+
+                if audio_buffer_shrunk {
+                    eprintln!("Audio buffer shrunk");
+                }
+
+                for sample in input.iter() {
+                    let sample = sample.to_sample::<f32>();
+                    audio_buffer.push_back(sample);
+                }
+
+                notify_clone.notify_one();
             },
             move |err| {
-                error!(log_clone, "Audio stream error - {}", err);
+                error!(log_clone1, "Audio stream error - {}", err);
             },
             None,
         )?;
 
-        let mut packet_buffer = vec![0u8; 65536];
-        let socket = UdpSocket::bind(sock_addr).context("Failed to bind UDP socket and port")?;
-
-        socket.set_write_timeout(Some(Duration::from_millis(1000)))?;
-
-        let token = CancelationToken::new();
-        let token_clone = token.clone();
-        let log_clone = self.log.clone();
-
-        ctrlc::set_handler(move || {
-            output!(log_clone, "\nStopping...");
-            token_clone.cancel();
-            ()
-        })?;
-
-        let mut last_sequence_number = 1u64;
-
         stream.play()?;
 
-        output!(self.log, "Sending audio to address {}", sock_addr);
-
         loop {
-            match socket.send_to(&mut packet_buffer, sock_addr) {
-                Ok(_) => {}
-                Err(e) => match e.kind() {
-                    ErrorKind::WouldBlock => {}
-                    other_error => {
-                        error!(self.log, "Failed to send audio packet - {}", other_error);
-                    }
-                },
-            }
-
-            if token.is_canceled() {
-                break;
-            }
-
-            let sequence_number;
-
-            if packet_buffer.len() >= size_of::<u64>() {
-                sequence_number =
-                    u64::from_le_bytes(packet_buffer[..size_of::<u64>()].try_into().unwrap());
-            } else {
-                // Packet too small
-                continue;
-            }
-
-            if sequence_number <= last_sequence_number {
-                // Out of sequence packet
-                continue;
-            }
-
-            last_sequence_number = sequence_number;
-
-            // Extract audio data
-            let audio_data = &packet_buffer[size_of::<u64>()..];
-
-            // Convert bytes to samples
-            if audio_data.len() % size_of::<f32>() != 0 {
-                // Audio data length not divisible by sample size
-                continue;
+            select! {
+                _ = notify.notified() => {
+                    // Drop through to handle below
+                }
+                _ = signal::ctrl_c() => {
+                    output!(self.log, "\nStopping...");
+                    break;
+                }
             }
 
             {
                 let mut audio_buffer = audio_buffer.lock().unwrap();
-                let chunks = audio_data.chunks_exact(size_of::<f32>());
 
-                // Prevent buffer overflow
-                while audio_buffer.len() + chunks.len() > audio_buffer.capacity() {
-                    audio_buffer.pop_front();
-                }
+                eprintln!(
+                    "Audio buffer size: {} ({:.2}%)",
+                    audio_buffer.len(),
+                    audio_buffer.len() as f32 / audio_buffer.capacity() as f32 * 100.0
+                );
 
-                for chunk in chunks {
-                    let sample = f32::from_le_bytes(chunk.try_into().unwrap());
-                    audio_buffer.push_back(sample);
+                while !audio_buffer.is_empty() {
+                    packet_buffer.clear();
+                    packet_buffer.extend_from_slice(&sequence_number.to_le_bytes());
+
+                    while !audio_buffer.is_empty()
+                        && packet_buffer.len() + 2 * size_of::<f32>() <= MTU
+                    {
+                        let sample = audio_buffer.pop_front().unwrap();
+                        let sample_slice = &sample.to_le_bytes();
+
+                        packet_buffer.extend_from_slice(sample_slice);
+
+                        // Duplicate the sample for mono input channels
+                        if channels == 1 {
+                            packet_buffer.extend_from_slice(sample_slice);
+                        }
+                    }
+
+                    sequence_number += 1;
+
+                    match socket.send_to(&packet_buffer, sock_addr).await {
+                        Ok(len) => {
+                            if len != packet_buffer.len() {
+                                warning!(self.log, "Partial packet sent");
+                            }
+                        }
+                        Err(e) => error!(self.log, "Failed to send audio packet - {}", e),
+                    }
                 }
             }
         }
@@ -641,8 +679,8 @@ impl<'a> AudioForwarderTool {
 mod tests {
     use super::*;
 
-    #[test]
-    fn basic_test() {
+    #[tokio::test]
+    async fn basic_test() {
         struct TestLogger;
 
         impl TestLogger {
@@ -661,6 +699,6 @@ mod tests {
         let mut tool = AudioForwarderTool::new(logger);
         let args: Vec<std::ffi::OsString> = vec!["".into(), "--help".into()];
 
-        tool.run(args).unwrap();
+        tool.run(args).await.unwrap();
     }
 }
