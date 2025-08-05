@@ -16,10 +16,20 @@ impl AudioForwarderLog for AudioForwarderLogger {
         println!("{}", args);
     }
     fn warning(self: &Self, args: Arguments) {
-        eprintln!("{}warning: {}", color::Fg(color::Yellow), args);
+        eprintln!(
+            "{0}warning: {2}{1}",
+            color::Fg(color::Yellow),
+            color::Fg(color::Reset),
+            args
+        );
     }
     fn error(self: &Self, args: Arguments) {
-        eprintln!("{}error: {}", color::Fg(color::Red), args);
+        eprintln!(
+            "{0}error: {2}{1}",
+            color::Fg(color::Red),
+            color::Fg(color::Reset),
+            args
+        );
     }
 }
 

@@ -14,7 +14,6 @@ use std::{
     net::SocketAddr,
     sync::{Arc, Mutex},
 };
-use termion::color;
 use tokio::{net::UdpSocket, select, signal, sync::Notify};
 
 // TODO @john: Make this configurable
@@ -34,6 +33,7 @@ pub struct AudioForwarderTool {
 struct StreamConfig {
     channels: u16,
     sample_rate: u32,
+    sample_format: SampleFormat,
 }
 
 impl StreamConfig {
@@ -47,9 +47,26 @@ impl StreamConfig {
             .next()
             .ok_or_else(|| anyhow::anyhow!("Missing sample rate"))?
             .parse()?;
+        let sample_format_str = parts
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("Missing sample format"))?;
+        let sample_format = match sample_format_str {
+            "i8" => SampleFormat::I8,
+            "i16" => SampleFormat::I16,
+            "i24" => SampleFormat::I24,
+            "i32" => SampleFormat::I32,
+            "i64" => SampleFormat::I64,
+            "u8" => SampleFormat::U8,
+            "u16" => SampleFormat::U16,
+            "u32" => SampleFormat::U32,
+            "u64" => SampleFormat::U64,
+            "f32" => SampleFormat::F32,
+            _ => anyhow::bail!("Unsupported sample format"),
+        };
         Ok(StreamConfig {
             channels,
             sample_rate: (sample_rate * 1000.0) as u32,
+            sample_format,
         })
     }
 }
@@ -67,6 +84,19 @@ impl StreamConfig {
 /// as a 2-channel audio if the `mono-to-stereo` flag is set.
 ///
 /// Network packets are sent as 32-bit floating point values in the range of -1.0 to 1.0.
+///
+/// Configurations are specified in the format `<channels>x<khz>x<format>`
+///
+/// - `channels` - The number of channels in the audio stream. For example, 1 or 2.
+/// - `khz` - The sample rate of the audio stream in kilohertz. For example, 44.1 or 48.
+/// - `format` - The format of the audio stream. The first letter
+///   of the format is the type of the data (`i`, `u` or `f`), and the second letter is the
+///   number of bits per sample.  For example, f32 is a 32-bit floating point number, i16 is a 16-bit
+///   signed integer, u8 is an 8-bit unsigned integer.
+///
+/// When listing the available audio devices, the format is `<channels>x<min-khz>-<max-khz>x<format>`.
+/// You can specify any sample rate in the given range when specifying the audio device configuration.
+///
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -252,8 +282,10 @@ impl<'a> AudioForwarderTool {
                 .context("Failed to get supported output configs")?
                 .into_iter()
                 .find(|config: &SupportedStreamConfigRange| {
-                    sample_config.sample_rate == config.max_sample_rate().0
+                    sample_config.sample_rate >= config.max_sample_rate().0
+                        && sample_config.sample_rate <= config.max_sample_rate().0
                         && sample_config.channels == config.channels()
+                        && sample_config.sample_format == config.sample_format()
                 })
                 .ok_or(anyhow!("Failed to find a supported output config"))?
                 .with_max_sample_rate()
@@ -299,8 +331,10 @@ impl<'a> AudioForwarderTool {
                 .context("Failed to get supported input configs")?
                 .into_iter()
                 .find(|config: &SupportedStreamConfigRange| {
-                    sample_config.sample_rate == config.max_sample_rate().0
+                    sample_config.sample_rate >= config.max_sample_rate().0
+                        && sample_config.sample_rate <= config.max_sample_rate().0
                         && sample_config.channels == config.channels()
+                        && sample_config.sample_format == config.sample_format()
                 })
                 .ok_or(anyhow!("Failed to find a supported input config"))?
                 .with_max_sample_rate()
@@ -552,36 +586,22 @@ impl<'a> AudioForwarderTool {
 
     pub fn list_devices(&self) -> Result<(), anyhow::Error> {
         fn format_config(
-            is_input: bool,
             config: &SupportedStreamConfigRange,
             default_config: &Option<SupportedStreamConfig>,
         ) -> String {
             format!(
-                "{} \"{}x{}\"{} ({} KHz to {} KHz, {} {}, {}){}{}",
-                if is_input { "Input" } else { "Output" },
+                "\"{}x{}x{}\"{}",
                 config.channels(),
-                config.max_sample_rate().0 as f32 / 1000.0,
-                color::Fg(color::Rgb(64, 64, 64)),
-                config.min_sample_rate().0 as f32 / 1000.0,
-                config.max_sample_rate().0 as f32 / 1000.0,
-                config.channels(),
-                if config.channels() > 1 {
-                    "channels"
+                if config.min_sample_rate() == config.max_sample_rate() {
+                    format!("{:.2}", config.max_sample_rate().0 as f32 / 1000.0)
                 } else {
-                    "channel"
+                    format!(
+                        "{:.2}-{:.2}",
+                        config.min_sample_rate().0 as f32 / 1000.0,
+                        config.max_sample_rate().0 as f32 / 1000.0
+                    )
                 },
-                match config.sample_format() {
-                    SampleFormat::I8 => "8 bit signed integer",
-                    SampleFormat::I16 => "16 bit signed integer",
-                    SampleFormat::I32 => "32 bit signed integer",
-                    SampleFormat::I64 => "32 bit signed integer",
-                    SampleFormat::U8 => "8 bit unsigned integer",
-                    SampleFormat::U32 => "32 bit unsigned integer",
-                    SampleFormat::U64 => "64 bit unsigned integer",
-                    SampleFormat::F32 => "32 bit float",
-                    SampleFormat::F64 => "64 bit float",
-                    _ => "unknown",
-                },
+                config.sample_format().to_string(),
                 if let Some(default_config) = default_config {
                     if default_config.channels() == config.channels()
                         && default_config.sample_rate() >= config.min_sample_rate()
@@ -594,8 +614,7 @@ impl<'a> AudioForwarderTool {
                     }
                 } else {
                     ""
-                },
-                color::Fg(color::Reset)
+                }
             )
         }
 
@@ -639,35 +658,41 @@ impl<'a> AudioForwarderTool {
                 let default_input_config = device.default_input_config().ok();
                 let input_configs = match device.supported_input_configs() {
                     Ok(f) => f.collect(),
-                    Err(e) => {
-                        error!(self.log, "Unable to get input configs - {:?}", e);
-                        Vec::new()
-                    }
+                    Err(_) => Vec::new(),
                 };
-                for config in input_configs.into_iter() {
-                    output!(
-                        self.log,
-                        "    {}",
-                        format_config(true, &config, &default_input_config)
-                    );
-                }
+                output!(
+                    self.log,
+                    "    Input {}",
+                    if input_configs.is_empty() {
+                        "none".to_string()
+                    } else {
+                        input_configs
+                            .into_iter()
+                            .map(|config| format_config(&config, &default_input_config))
+                            .collect::<Vec<String>>()
+                            .join(", ")
+                    }
+                );
 
                 // Output configs
                 let default_output_config = device.default_output_config().ok();
                 let output_configs = match device.supported_output_configs() {
                     Ok(f) => f.collect(),
-                    Err(e) => {
-                        error!(self.log, "Unable to get supported output configs - {:?}", e);
-                        Vec::new()
-                    }
+                    Err(_) => Vec::new(),
                 };
-                for config in output_configs.into_iter() {
-                    output!(
-                        self.log,
-                        "    {}",
-                        format_config(false, &config, &default_output_config)
-                    );
-                }
+                output!(
+                    self.log,
+                    "    Output {}",
+                    if output_configs.is_empty() {
+                        "none".to_string()
+                    } else {
+                        output_configs
+                            .into_iter()
+                            .map(|config| format_config(&config, &default_output_config))
+                            .collect::<Vec<String>>()
+                            .join(", ")
+                    }
+                );
             }
         }
 
