@@ -5,8 +5,8 @@ use clap::{Parser, Subcommand};
 use core::fmt::Arguments;
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
-    Device, FromSample, InputCallbackInfo, OutputCallbackInfo, Sample, SampleFormat, SizedSample,
-    SupportedStreamConfig, SupportedStreamConfigRange,
+    Device, FromSample, InputCallbackInfo, OutputCallbackInfo, Sample, SampleFormat, SampleRate,
+    SizedSample, SupportedStreamConfig, SupportedStreamConfigRange,
 };
 use dasp_sample::ToSample;
 use std::{
@@ -130,10 +130,6 @@ struct ReceiveArgs {
     /// The IP address and port to listen on for incoming audio
     #[arg(long = "addr")]
     sock_addr: SocketAddr,
-
-    /// The IP address to allow receiving audio from
-    #[arg(long = "allow")]
-    allow_addr: Option<SocketAddr>,
 }
 
 #[derive(Parser, Debug)]
@@ -258,7 +254,10 @@ impl<'a> AudioForwarderTool {
         let host_id = available_hosts
             .iter()
             .find(|item| host_name == item.name())
-            .ok_or(anyhow!("There is no audio host with name '{}'", host_name))?;
+            .ok_or(anyhow!(
+                "There is no audio host with name \"{}\"",
+                host_name
+            ))?;
 
         let host = cpal::host_from_id(*host_id)?;
 
@@ -270,7 +269,10 @@ impl<'a> AudioForwarderTool {
                     Ok(name) => name == device_name,
                     Err(_) => false,
                 })
-                .ok_or(anyhow!("There is no audio device named '{}'", device_name))?
+                .ok_or(anyhow!(
+                    "There is no audio device named \"{}\"",
+                    device_name
+                ))?
         } else {
             host.default_output_device()
                 .ok_or(anyhow!("Failed to get a default output device"))?
@@ -282,13 +284,13 @@ impl<'a> AudioForwarderTool {
                 .context("Failed to get supported output configs")?
                 .into_iter()
                 .find(|config: &SupportedStreamConfigRange| {
-                    sample_config.sample_rate >= config.max_sample_rate().0
+                    sample_config.sample_rate >= config.min_sample_rate().0
                         && sample_config.sample_rate <= config.max_sample_rate().0
                         && sample_config.channels == config.channels()
                         && sample_config.sample_format == config.sample_format()
                 })
                 .ok_or(anyhow!("Failed to find a supported output config"))?
-                .with_max_sample_rate()
+                .with_sample_rate(SampleRate(sample_config.sample_rate))
         } else {
             device
                 .default_output_config()
@@ -307,7 +309,10 @@ impl<'a> AudioForwarderTool {
         let host_id = available_hosts
             .iter()
             .find(|item| host_name == item.name())
-            .ok_or(anyhow!("There is no audio host with name '{}'", host_name))?;
+            .ok_or(anyhow!(
+                "There is no audio host with name \"{}\"",
+                host_name
+            ))?;
 
         let host = cpal::host_from_id(*host_id)?;
 
@@ -319,7 +324,10 @@ impl<'a> AudioForwarderTool {
                     Ok(name) => name == device_name,
                     Err(_) => false,
                 })
-                .ok_or(anyhow!("There is no audio device named '{}'", device_name))?
+                .ok_or(anyhow!(
+                    "There is no audio device named \"{}\"",
+                    device_name
+                ))?
         } else {
             host.default_input_device()
                 .ok_or(anyhow!("Failed to get a default input device"))?
@@ -331,13 +339,13 @@ impl<'a> AudioForwarderTool {
                 .context("Failed to get supported input configs")?
                 .into_iter()
                 .find(|config: &SupportedStreamConfigRange| {
-                    sample_config.sample_rate >= config.max_sample_rate().0
+                    sample_config.sample_rate >= config.min_sample_rate().0
                         && sample_config.sample_rate <= config.max_sample_rate().0
                         && sample_config.channels == config.channels()
                         && sample_config.sample_format == config.sample_format()
                 })
                 .ok_or(anyhow!("Failed to find a supported input config"))?
-                .with_max_sample_rate()
+                .with_sample_rate(SampleRate(sample_config.sample_rate))
         } else {
             device
                 .default_input_config()
@@ -623,7 +631,7 @@ impl<'a> AudioForwarderTool {
         for host_id in available_hosts.iter() {
             let host = cpal::host_from_id(*host_id)?;
 
-            output!(self.log, "Host \"{:?}\"", host_id);
+            output!(self.log, "Host \"{}\"", host_id.name());
 
             let default_device_input_name = host
                 .default_input_device()
