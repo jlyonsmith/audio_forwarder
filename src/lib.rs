@@ -34,7 +34,6 @@
 //! for the `send` or `receive` commands.
 //!
 use anyhow::{anyhow, Context, Result};
-use clap::{Parser, Subcommand};
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
     Device, FromSample, InputCallbackInfo, OutputCallbackInfo, Sample, SampleFormat, SampleRate,
@@ -42,17 +41,15 @@ use cpal::{
 };
 use dasp_sample::ToSample;
 use log::{debug, error, info, warn};
+use std::net::SocketAddr;
 use std::{
     collections::VecDeque,
-    net::SocketAddr,
     sync::{Arc, Mutex},
 };
 use tokio::{net::UdpSocket, select, signal, sync::Notify};
 
 // TODO @john: Make this configurable
 const MTU: usize = 65536;
-
-pub struct AudioForwarderTool {}
 
 #[derive(Debug, Clone)]
 pub struct StreamConfig {
@@ -62,7 +59,7 @@ pub struct StreamConfig {
 }
 
 impl StreamConfig {
-    fn parse(s: &str) -> Result<StreamConfig, anyhow::Error> {
+    pub fn parse(s: &str) -> Result<StreamConfig, anyhow::Error> {
         let mut parts = s.split('x');
         let channels = parts
             .next()
@@ -96,138 +93,78 @@ impl StreamConfig {
     }
 }
 
-#[derive(Parser, Debug)]
-#[clap(version, about, long_about = None)]
-pub struct AudioForwarderArgs {
-    #[command(subcommand)]
-    pub command: Commands,
-}
+pub struct AudioForwarderTool {}
 
-#[derive(Subcommand, Debug)]
-pub enum Commands {
-    /// List available audio hosts, host devices and device stream configurations
-    List,
-    /// Receive audio from a remote host
-    Receive(ReceiveArgs),
-    /// Send audio to a remote host
-    Send(SendArgs),
-}
-
-#[derive(Parser, Debug)]
-pub struct ReceiveArgs {
-    /// The name of the audio device host
-    #[arg(long = "host")]
-    pub host_name: String,
-
-    /// The name of the audio device
-    pub device_name: Option<String>,
-
-    /// The audio device stream configuration in the format "<channels>x<sample_rate>"
-    #[arg(long = "config", value_parser = StreamConfig::parse)]
-    pub stream_config: Option<StreamConfig>,
-
-    /// The IP address and port to listen on for incoming audio
-    #[arg(long = "addr")]
-    pub sock_addr: SocketAddr,
-}
-
-#[derive(Parser, Debug)]
-pub struct SendArgs {
-    /// The name of the audio host
-    #[arg(long = "host")]
-    pub host_name: String,
-
-    /// The name of the audio device
-    #[arg(long = "device")]
-    pub device_name: Option<String>,
-
-    /// The audio device stream configuration in the format "<channels>x<sample_rate>"
-    #[arg(long = "config", value_parser = StreamConfig::parse)]
-    pub stream_config: Option<StreamConfig>,
-
-    /// The IP address and port to send audio to
-    #[arg(long = "addr")]
-    pub sock_addr: SocketAddr,
-}
-
-impl<'a> AudioForwarderTool {
+impl AudioForwarderTool {
     pub fn new() -> AudioForwarderTool {
         AudioForwarderTool {}
     }
 
-    pub async fn run(&self, args: &AudioForwarderArgs) -> Result<(), anyhow::Error> {
-        match &args.command {
-            Commands::List => {
-                self.list_devices()?;
+    pub async fn receive(
+        &self,
+        sock_addr: &SocketAddr,
+        host_name: &str,
+        device_name: &Option<String>,
+        stream_config: &Option<StreamConfig>,
+    ) -> Result<(), anyhow::Error> {
+        let (device, config) =
+            Self::get_output_device_config(host_name, device_name, stream_config)?;
+
+        info!(
+            "Receiving audio from {} to {} -> {} -> {} channel{} at {} Hz",
+            sock_addr,
+            host_name,
+            device.name().unwrap_or("Unknown".to_string()),
+            config.channels(),
+            if config.channels() == 1 { "" } else { "s" },
+            config.sample_rate().0,
+        );
+
+        match config.sample_format() {
+            SampleFormat::F32 => {
+                self.receive_audio::<f32>(sock_addr, &device, &config)
+                    .await?
             }
-            Commands::Receive(args) => {
-                let (device, config) = Self::get_output_device_config(
-                    &args.host_name,
-                    &args.device_name,
-                    &args.stream_config,
-                )?;
-
-                info!(
-                    "Receiving audio from {} to {} -> {} -> {} channel{} at {} Hz",
-                    args.sock_addr,
-                    args.host_name,
-                    device.name().unwrap_or("Unknown".to_string()),
-                    config.channels(),
-                    if config.channels() == 1 { "" } else { "s" },
-                    config.sample_rate().0,
-                );
-
-                match config.sample_format() {
-                    SampleFormat::F32 => {
-                        self.receive_audio::<f32>(&args.sock_addr, &device, &config)
-                            .await?
-                    }
-                    SampleFormat::I16 => {
-                        self.receive_audio::<i16>(&args.sock_addr, &device, &config)
-                            .await?
-                    }
-                    SampleFormat::U16 => {
-                        self.receive_audio::<u16>(&args.sock_addr, &device, &config)
-                            .await?
-                    }
-                    _ => panic!("Unsupported sample format on output device"),
-                }
+            SampleFormat::I16 => {
+                self.receive_audio::<i16>(sock_addr, &device, &config)
+                    .await?
             }
-            Commands::Send(args) => {
-                let (device, config) = Self::get_input_device_config(
-                    &args.host_name,
-                    &args.device_name,
-                    &args.stream_config,
-                )?;
-
-                info!(
-                    "Sending audio from {} -> {} -> {} channel{} at {} Hz to {}",
-                    args.host_name,
-                    device.name().unwrap_or("Unknown".to_string()),
-                    config.channels(),
-                    if config.channels() == 1 { "" } else { "s" },
-                    config.sample_rate().0,
-                    args.sock_addr,
-                );
-
-                match config.sample_format() {
-                    SampleFormat::F32 => {
-                        self.send_audio::<f32>(&args.sock_addr, &device, &config)
-                            .await?
-                    }
-                    SampleFormat::I16 => {
-                        self.send_audio::<i16>(&args.sock_addr, &device, &config)
-                            .await?
-                    }
-                    SampleFormat::U16 => {
-                        self.send_audio::<u16>(&args.sock_addr, &device, &config)
-                            .await?
-                    }
-                    _ => panic!("Unsupported sample format on input device"),
-                }
+            SampleFormat::U16 => {
+                self.receive_audio::<u16>(sock_addr, &device, &config)
+                    .await?
             }
+            _ => panic!("Unsupported sample format on output device"),
         }
 
+        Ok(())
+    }
+
+    pub async fn send(
+        &self,
+        sock_addr: &SocketAddr,
+        host_name: &str,
+        device_name: &Option<String>,
+        stream_config: &Option<StreamConfig>,
+    ) -> Result<(), anyhow::Error> {
+        let (device, config) =
+            Self::get_input_device_config(host_name, device_name, stream_config)?;
+
+        info!(
+            "Sending audio from {} -> {} -> {} channel{} at {} Hz to {}",
+            host_name,
+            device.name().unwrap_or("Unknown".to_string()),
+            config.channels(),
+            if config.channels() == 1 { "" } else { "s" },
+            config.sample_rate().0,
+            sock_addr,
+        );
+
+        match config.sample_format() {
+            SampleFormat::F32 => self.send_audio::<f32>(sock_addr, &device, &config).await?,
+            SampleFormat::I16 => self.send_audio::<i16>(sock_addr, &device, &config).await?,
+            SampleFormat::U16 => self.send_audio::<u16>(sock_addr, &device, &config).await?,
+            _ => panic!("Unsupported sample format on input device"),
+        }
         Ok(())
     }
 
@@ -576,7 +513,7 @@ impl<'a> AudioForwarderTool {
         Ok(())
     }
 
-    pub fn list_devices(&self) -> Result<(), anyhow::Error> {
+    pub fn list(&self) -> Result<(), anyhow::Error> {
         fn format_config(
             config: &SupportedStreamConfigRange,
             default_config: &Option<SupportedStreamConfig>,
@@ -615,7 +552,7 @@ impl<'a> AudioForwarderTool {
         for host_id in available_hosts.iter() {
             let host = cpal::host_from_id(*host_id)?;
 
-            info!("Host \"{}\"", host_id.name());
+            println!("Host \"{}\"", host_id.name());
 
             let default_device_input_name = host
                 .default_input_device()
@@ -630,7 +567,7 @@ impl<'a> AudioForwarderTool {
             for device in devices {
                 let device_name = device.name()?;
 
-                info!(
+                println!(
                     "  Device \"{}\"{}{}",
                     device_name,
                     if device_name == default_device_input_name {
@@ -651,7 +588,7 @@ impl<'a> AudioForwarderTool {
                     Ok(f) => f.collect(),
                     Err(_) => Vec::new(),
                 };
-                info!(
+                println!(
                     "    Input {}",
                     if input_configs.is_empty() {
                         "none".to_string()
@@ -670,7 +607,7 @@ impl<'a> AudioForwarderTool {
                     Ok(f) => f.collect(),
                     Err(_) => Vec::new(),
                 };
-                info!(
+                println!(
                     "    Output {}",
                     if output_configs.is_empty() {
                         "none".to_string()
