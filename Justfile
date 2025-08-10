@@ -26,6 +26,10 @@ doc OPEN='':
     cargo doc
   end
 
+readme:
+  #!/usr/bin/env fish
+  cargo rdme
+
 release OPERATION='incrPatch':
   #!/usr/bin/env fish
   function info
@@ -39,7 +43,7 @@ release OPERATION='incrPatch':
   end
 
   if test ! -e "Cargo.toml"
-    error "Cargo.toml file not found"
+    error "Cargo.toml file not found - must run in project root"
     exit 1
   end
 

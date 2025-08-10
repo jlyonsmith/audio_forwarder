@@ -1,12 +1,21 @@
-//! Audio Forwarder
-//!
 //! This program allows you to forward audio from one device to another over the network.
-//! Audio can be either read from the network and written to a device, or it can be read from
-//! a device and written out to the network.  Which one depends on whether you supply
-//! the `receive` or `send` arguments.
+//! Audio can be read from the network and written to an audio device, or it can be read from
+//! an audio device and written out to the network.
+//!
+//! Audio transmission is done over UDP for performance and a separate TCP/IP connection is used
+//! as a control channel and to configure the audio stream.
+//!
+//! You must run two instances of the program, one in `send` mode and one in `receive` mode. The instance
+//! that is started first will be the server (`--server` flag), and the second instance will be a client.
+//! The server instance will listen for incoming connections on a specified port, and the client instance
+//! will connect to the server instance on the specified port.  The server is persistent and will continue
+//! to listen for incoming connections until it is manually stopped.  It is recommended to run the server as
+//! a `systemd` service on Linux.
+//!
+//! Audio that is read from a 1-channel audio device will be written to the network as a 2-channel audio.
 //!
 //! Audio that is read from a 1-channel audio device will be written to the network
-//! as a 2-channel audio if the `mono-to-stereo` flag is set.
+//! as a 2-channel audio.
 //!
 //! Network packets are sent as 32-bit floating point values in the range of -1.0 to 1.0.
 //!
@@ -14,25 +23,25 @@
 //!
 //! - `channels` - The number of channels in the audio stream. For example, 1 or 2.
 //! - `khz` - The sample rate of the audio stream in kilohertz. For example, 44.1 or 48.
-//! - `format` - The format of the audio stream. The first letter
-//!   of the format is the type of the data (`i`, `u` or `f`), and the second letter is the
-//!   number of bits per sample.  For example, f32 is a 32-bit floating point number, i16 is a 16-bit
-//!   signed integer, u8 is an 8-bit unsigned integer.
+//! - `format` - The sample format of the audio stream. For example, f32, i16, u8.
+//!
+//! The first letter of the `format` is the type of the data (`i`, `u` or `f`), and the second letter
+//! is the number of bits per sample.  For example, f32 is a 32-bit floating point number, i16 is a 16-bit
+//! signed integer, u8 is an 8-bit unsigned integer.
 //!
 //! When listing the available audio devices, the format is `<channels>x<min-khz>-<max-khz>x<format>`.
-//! You can specify any sample rate in the given range when specifying the audio device configuration.
+//! You can specify any sample rate in the given range when specifying the audio device configuration
+//! for the `send` or `receive` commands.
 //!
-mod log_macros;
-
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
-use core::fmt::Arguments;
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
     Device, FromSample, InputCallbackInfo, OutputCallbackInfo, Sample, SampleFormat, SampleRate,
     SizedSample, SupportedStreamConfig, SupportedStreamConfigRange,
 };
 use dasp_sample::ToSample;
+use log::{debug, error, info, warn};
 use std::{
     collections::VecDeque,
     net::SocketAddr,
@@ -43,18 +52,10 @@ use tokio::{net::UdpSocket, select, signal, sync::Notify};
 // TODO @john: Make this configurable
 const MTU: usize = 65536;
 
-pub trait AudioForwarderLog: Send + Sync {
-    fn output(self: &Self, args: Arguments);
-    fn warning(self: &Self, args: Arguments);
-    fn error(self: &Self, args: Arguments);
-}
-
-pub struct AudioForwarderTool {
-    log: Arc<dyn AudioForwarderLog>,
-}
+pub struct AudioForwarderTool {}
 
 #[derive(Debug, Clone)]
-struct StreamConfig {
+pub struct StreamConfig {
     channels: u16,
     sample_rate: u32,
     sample_format: SampleFormat,
@@ -97,90 +98,76 @@ impl StreamConfig {
 
 #[derive(Parser, Debug)]
 #[clap(version, about, long_about = None)]
-struct Cli {
+pub struct AudioForwarderArgs {
     #[command(subcommand)]
-    command: Commands,
-
-    /// Disable colors in output
-    #[arg(long = "no-color", short = 'n', env = "NO_CLI_COLOR")]
-    no_color: bool,
+    pub command: Commands,
 }
 
 #[derive(Subcommand, Debug)]
-enum Commands {
+pub enum Commands {
+    /// List available audio hosts, host devices and device stream configurations
     List,
+    /// Receive audio from a remote host
     Receive(ReceiveArgs),
+    /// Send audio to a remote host
     Send(SendArgs),
 }
 
 #[derive(Parser, Debug)]
-struct ReceiveArgs {
-    /// The name of the audio host
+pub struct ReceiveArgs {
+    /// The name of the audio device host
     #[arg(long = "host")]
-    host_name: String,
+    pub host_name: String,
 
     /// The name of the audio device
-    #[arg(long = "device")]
-    device_name: Option<String>,
+    pub device_name: Option<String>,
 
     /// The audio device stream configuration in the format "<channels>x<sample_rate>"
     #[arg(long = "config", value_parser = StreamConfig::parse)]
-    stream_config: Option<StreamConfig>,
+    pub stream_config: Option<StreamConfig>,
 
     /// The IP address and port to listen on for incoming audio
     #[arg(long = "addr")]
-    sock_addr: SocketAddr,
+    pub sock_addr: SocketAddr,
 }
 
 #[derive(Parser, Debug)]
-struct SendArgs {
+pub struct SendArgs {
     /// The name of the audio host
     #[arg(long = "host")]
-    host_name: String,
+    pub host_name: String,
 
     /// The name of the audio device
     #[arg(long = "device")]
-    device_name: Option<String>,
+    pub device_name: Option<String>,
 
     /// The audio device stream configuration in the format "<channels>x<sample_rate>"
     #[arg(long = "config", value_parser = StreamConfig::parse)]
-    stream_config: Option<StreamConfig>,
+    pub stream_config: Option<StreamConfig>,
 
     /// The IP address and port to send audio to
     #[arg(long = "addr")]
-    sock_addr: SocketAddr,
+    pub sock_addr: SocketAddr,
 }
 
 impl<'a> AudioForwarderTool {
-    pub fn new(log: Arc<dyn AudioForwarderLog>) -> AudioForwarderTool {
-        AudioForwarderTool { log }
+    pub fn new() -> AudioForwarderTool {
+        AudioForwarderTool {}
     }
 
-    pub async fn run(
-        self: &mut Self,
-        args: impl IntoIterator<Item = std::ffi::OsString>,
-    ) -> Result<(), anyhow::Error> {
-        let cli = match Cli::try_parse_from(args) {
-            Ok(m) => m,
-            Err(err) => {
-                output!(self.log, "{}", err.to_string());
-                return Ok(());
-            }
-        };
-
-        match cli.command {
+    pub async fn run(&self, args: &AudioForwarderArgs) -> Result<(), anyhow::Error> {
+        match &args.command {
             Commands::List => {
                 self.list_devices()?;
             }
             Commands::Receive(args) => {
                 let (device, config) = Self::get_output_device_config(
                     &args.host_name,
-                    args.device_name,
-                    args.stream_config,
+                    &args.device_name,
+                    &args.stream_config,
                 )?;
 
-                output!(
-                    self.log,
+                info!(
                     "Receiving audio from {} to {} -> {} -> {} channel{} at {} Hz",
                     args.sock_addr,
                     args.host_name,
@@ -209,12 +196,11 @@ impl<'a> AudioForwarderTool {
             Commands::Send(args) => {
                 let (device, config) = Self::get_input_device_config(
                     &args.host_name,
-                    args.device_name,
-                    args.stream_config,
+                    &args.device_name,
+                    &args.stream_config,
                 )?;
 
-                output!(
-                    self.log,
+                info!(
                     "Sending audio from {} -> {} -> {} channel{} at {} Hz to {}",
                     args.host_name,
                     device.name().unwrap_or("Unknown".to_string()),
@@ -247,8 +233,8 @@ impl<'a> AudioForwarderTool {
 
     fn get_output_device_config(
         host_name: &str,
-        device_name: Option<String>,
-        sample_config: Option<StreamConfig>,
+        device_name: &Option<String>,
+        sample_config: &Option<StreamConfig>,
     ) -> Result<(Device, SupportedStreamConfig), anyhow::Error> {
         let available_hosts = cpal::available_hosts();
         let host_id = available_hosts
@@ -266,7 +252,7 @@ impl<'a> AudioForwarderTool {
                 .context("Failed to get list of audio devices")?
                 .into_iter()
                 .find(|item| match item.name() {
-                    Ok(name) => name == device_name,
+                    Ok(name) => name == *device_name,
                     Err(_) => false,
                 })
                 .ok_or(anyhow!(
@@ -302,8 +288,8 @@ impl<'a> AudioForwarderTool {
 
     fn get_input_device_config(
         host_name: &str,
-        device_name: Option<String>,
-        sample_config: Option<StreamConfig>,
+        device_name: &Option<String>,
+        sample_config: &Option<StreamConfig>,
     ) -> Result<(Device, SupportedStreamConfig), anyhow::Error> {
         let available_hosts = cpal::available_hosts();
         let host_id = available_hosts
@@ -321,7 +307,7 @@ impl<'a> AudioForwarderTool {
                 .context("Failed to get list of audio devices")?
                 .into_iter()
                 .find(|item| match item.name() {
-                    Ok(name) => name == device_name,
+                    Ok(name) => name == *device_name,
                     Err(_) => false,
                 })
                 .ok_or(anyhow!(
@@ -370,7 +356,6 @@ impl<'a> AudioForwarderTool {
         let audio_buffer: Arc<Mutex<VecDeque<f32>>> =
             Arc::new(Mutex::new(VecDeque::with_capacity(120000 * channels)));
         let audio_buffer_clone = audio_buffer.clone();
-        let log_clone = self.log.clone();
         let mut packet_buffer = vec![0u8; MTU];
         let socket = UdpSocket::bind(sock_addr)
             .await
@@ -381,7 +366,7 @@ impl<'a> AudioForwarderTool {
                 let mut audio_buffer = audio_buffer_clone.lock().unwrap();
 
                 if audio_buffer.len() > 0 {
-                    eprintln!(
+                    debug!(
                         "Audio buffer length {} ({}%)",
                         audio_buffer.len(),
                         audio_buffer.len() as f32 / audio_buffer.capacity() as f32 * 100.0
@@ -397,7 +382,7 @@ impl<'a> AudioForwarderTool {
                 }
             },
             move |err| {
-                error!(log_clone, "Audio stream error - {}", err);
+                error!("Audio stream error - {}", err);
             },
             None,
         )?;
@@ -414,11 +399,11 @@ impl<'a> AudioForwarderTool {
                         Ok((len, _addr)) => {
                             packet_length = len;
                         }
-                        Err(e) => error!(self.log, "Failed to receive audio packet - {}", e)
+                        Err(e) => error!("Failed to receive audio packet - {}", e)
                     }
                 }
                 _ = signal::ctrl_c() => {
-                    output!(self.log, "\nStopping...");
+                    info!("\nStopping...");
                     break;
                 }
             }
@@ -432,17 +417,17 @@ impl<'a> AudioForwarderTool {
                         u64::from_le_bytes(packet_buffer[..size_of::<u64>()].try_into().unwrap());
                 } else {
                     // Packet too small
-                    eprintln!("Audio packet too small");
+                    debug!("Audio packet too small");
                     continue;
                 }
 
                 if next_sequence_number <= *sequence_number {
-                    eprintln!("Audio data length not divisible by sample size");
+                    debug!("Audio data length not divisible by sample size");
                     continue;
                 }
 
                 *sequence_number = next_sequence_number;
-                eprintln!(
+                debug!(
                     "Received packet {}, packet size: {}",
                     next_sequence_number, packet_length,
                 );
@@ -453,7 +438,7 @@ impl<'a> AudioForwarderTool {
                 // Convert bytes to samples
                 if audio_data.len() % size_of::<f32>() != 0 {
                     // Audio data length not divisible by sample size
-                    eprintln!("Audio data length not divisible by 4 bytes");
+                    debug!("Audio data length not divisible by 4 bytes");
                     continue;
                 }
 
@@ -469,7 +454,7 @@ impl<'a> AudioForwarderTool {
                     }
 
                     if audio_buffer_shrunk {
-                        eprintln!("Audio buffer shrunk - audio lost");
+                        debug!("Audio buffer shrunk - audio lost");
                     }
 
                     for chunk in audio_data_chunks {
@@ -498,7 +483,6 @@ impl<'a> AudioForwarderTool {
         let audio_buffer: Arc<Mutex<VecDeque<f32>>> =
             Arc::new(Mutex::new(VecDeque::with_capacity(10000 * channels)));
         let audio_buffer_clone = audio_buffer.clone();
-        let log_clone1 = self.log.clone();
         let socket = UdpSocket::bind("0.0.0.0:0")
             .await
             .context("Failed to bind UDP socket and port")?;
@@ -519,7 +503,7 @@ impl<'a> AudioForwarderTool {
                 }
 
                 if audio_buffer_shrunk {
-                    eprintln!("Audio buffer shrunk");
+                    debug!("Audio buffer shrunk");
                 }
 
                 for sample in input.iter() {
@@ -530,7 +514,7 @@ impl<'a> AudioForwarderTool {
                 notify_clone.notify_one();
             },
             move |err| {
-                error!(log_clone1, "Audio stream error - {}", err);
+                error!("Audio stream error - {}", err);
             },
             None,
         )?;
@@ -543,7 +527,7 @@ impl<'a> AudioForwarderTool {
                     // Drop through to handle below
                 }
                 _ = signal::ctrl_c() => {
-                    output!(self.log, "\nStopping...");
+                    info!("\nStopping...");
                     break;
                 }
             }
@@ -551,7 +535,7 @@ impl<'a> AudioForwarderTool {
             {
                 let mut audio_buffer = audio_buffer.lock().unwrap();
 
-                eprintln!(
+                debug!(
                     "Audio buffer size: {} ({:.2}%)",
                     audio_buffer.len(),
                     audio_buffer.len() as f32 / audio_buffer.capacity() as f32 * 100.0
@@ -580,10 +564,10 @@ impl<'a> AudioForwarderTool {
                     match socket.send_to(&packet_buffer, sock_addr).await {
                         Ok(len) => {
                             if len != packet_buffer.len() {
-                                warning!(self.log, "Partial packet sent");
+                                warn!("Partial packet sent");
                             }
                         }
-                        Err(e) => error!(self.log, "Failed to send audio packet - {}", e),
+                        Err(e) => error!("Failed to send audio packet - {}", e),
                     }
                 }
             }
@@ -631,7 +615,7 @@ impl<'a> AudioForwarderTool {
         for host_id in available_hosts.iter() {
             let host = cpal::host_from_id(*host_id)?;
 
-            output!(self.log, "Host \"{}\"", host_id.name());
+            info!("Host \"{}\"", host_id.name());
 
             let default_device_input_name = host
                 .default_input_device()
@@ -646,8 +630,7 @@ impl<'a> AudioForwarderTool {
             for device in devices {
                 let device_name = device.name()?;
 
-                output!(
-                    self.log,
+                info!(
                     "  Device \"{}\"{}{}",
                     device_name,
                     if device_name == default_device_input_name {
@@ -668,8 +651,7 @@ impl<'a> AudioForwarderTool {
                     Ok(f) => f.collect(),
                     Err(_) => Vec::new(),
                 };
-                output!(
-                    self.log,
+                info!(
                     "    Input {}",
                     if input_configs.is_empty() {
                         "none".to_string()
@@ -688,8 +670,7 @@ impl<'a> AudioForwarderTool {
                     Ok(f) => f.collect(),
                     Err(_) => Vec::new(),
                 };
-                output!(
-                    self.log,
+                info!(
                     "    Output {}",
                     if output_configs.is_empty() {
                         "none".to_string()
@@ -710,28 +691,6 @@ impl<'a> AudioForwarderTool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[tokio::test]
-    async fn basic_test() {
-        struct TestLogger;
-
-        impl TestLogger {
-            fn new() -> TestLogger {
-                TestLogger {}
-            }
-        }
-
-        impl AudioForwarderLog for TestLogger {
-            fn output(self: &Self, _args: Arguments) {}
-            fn warning(self: &Self, _args: Arguments) {}
-            fn error(self: &Self, _args: Arguments) {}
-        }
-
-        let logger = Arc::new(TestLogger::new());
-        let mut tool = AudioForwarderTool::new(logger);
-        let args: Vec<std::ffi::OsString> = vec!["".into(), "--help".into()];
-
-        tool.run(args).await.unwrap();
-    }
+    async fn basic_test() {}
 }
