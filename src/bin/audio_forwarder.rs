@@ -1,4 +1,4 @@
-use audio_forwarder::{AudioForwarderTool, StreamConfig};
+use audio_forwarder::{AudioForwarder, StreamConfig};
 use clap::{Parser, Subcommand};
 use env_logger::Env;
 use log::{error, LevelFilter};
@@ -73,7 +73,7 @@ async fn main() {
         }
     };
 
-    let tool = AudioForwarderTool::new();
+    let tool = AudioForwarder::new();
     let log_level = args.log_level;
 
     fn init_logger(log_level: LevelFilter) {

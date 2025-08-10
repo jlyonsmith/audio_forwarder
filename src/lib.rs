@@ -93,11 +93,11 @@ impl StreamConfig {
     }
 }
 
-pub struct AudioForwarderTool {}
+pub struct AudioForwarder {}
 
-impl AudioForwarderTool {
-    pub fn new() -> AudioForwarderTool {
-        AudioForwarderTool {}
+impl AudioForwarder {
+    pub fn new() -> AudioForwarder {
+        AudioForwarder {}
     }
 
     pub async fn receive(
@@ -518,16 +518,22 @@ impl AudioForwarderTool {
             config: &SupportedStreamConfigRange,
             default_config: &Option<SupportedStreamConfig>,
         ) -> String {
+            fn format_as_khz(rate: u32) -> String {
+                format!("{:.2}", rate as f32 / 1000.0)
+                    .trim_end_matches("0")
+                    .trim_end_matches(".")
+                    .to_string()
+            }
             format!(
                 "\"{}x{}x{}\"{}",
                 config.channels(),
                 if config.min_sample_rate() == config.max_sample_rate() {
-                    format!("{:.2}", config.max_sample_rate().0 as f32 / 1000.0)
+                    format!("{}", format_as_khz(config.max_sample_rate().0))
                 } else {
                     format!(
-                        "{:.2}-{:.2}",
-                        config.min_sample_rate().0 as f32 / 1000.0,
-                        config.max_sample_rate().0 as f32 / 1000.0
+                        "{}-{}",
+                        format_as_khz(config.min_sample_rate().0),
+                        format_as_khz(config.max_sample_rate().0)
                     )
                 },
                 config.sample_format().to_string(),
