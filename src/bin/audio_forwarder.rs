@@ -18,47 +18,66 @@ struct AudioForwarderArgs {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// List available audio hosts, host devices and device stream configurations
+    /// List available audio hosts, devices and stream configurations
     List,
-    /// Receive audio from a remote host
+    /// List a remote computer's audio hosts, devices and stream configurations
+    ListRemote(ListRemoteArgs),
+    /// Receive audio from a remote computer
     Receive(ReceiveArgs),
-    /// Send audio to a remote host
+    /// Send audio to a remote computer
     Send(SendArgs),
+    /// Listen for incoming audio connections from remote computers
+    Listen(ListenArgs),
 }
 
 #[derive(Parser, Debug)]
 pub struct ReceiveArgs {
-    /// The name of the audio device host
+    /// The name of the local audio device host to send audio to
     #[arg(long = "host")]
     pub host_name: String,
 
-    /// The name of the audio device
+    /// The name of the local audio device to send audio to
+    #[arg(long = "device")]
     pub device_name: Option<String>,
 
-    /// The audio device stream configuration in the format "<channels>x<sample_rate>"
+    /// The local audio device stream configuration in the format "<channels>x<sample_rate>" to send audio to
     #[arg(long = "config", value_parser = StreamConfig::parse)]
     pub stream_config: Option<StreamConfig>,
 
-    /// The IP address and port to listen on for incoming audio
+    /// The IP address and port of a remote computer to receive audio from
     #[arg(long = "addr")]
     pub sock_addr: SocketAddr,
 }
 
 #[derive(Parser, Debug)]
 struct SendArgs {
-    /// The name of the audio host
+    /// The name of the audio host to receive audio from
     #[arg(long = "host")]
     host_name: String,
 
-    /// The name of the audio device
+    /// The name of the audio device to receive audio from
     #[arg(long = "device")]
     device_name: Option<String>,
 
-    /// The audio device stream configuration in the format "<channels>x<sample_rate>"
+    /// The audio device stream configuration in the format "<channels>x<sample_rate>" to receive audio from
     #[arg(long = "config", value_parser = StreamConfig::parse)]
     stream_config: Option<StreamConfig>,
 
     /// The IP address and port to send audio to
+    #[arg(long = "addr")]
+    sock_addr: SocketAddr,
+}
+
+#[derive(Parser, Debug)]
+struct ListenArgs {
+    /// The IP address and port to listen on for incoming requests
+    #[arg(long = "addr")]
+    sock_addr: SocketAddr,
+}
+
+#[derive(Parser, Debug)]
+struct ListRemoteArgs {
+    /// The IP address and port of the computer to list remote audio devices from
     #[arg(long = "addr")]
     sock_addr: SocketAddr,
 }
@@ -103,6 +122,13 @@ async fn main() {
             .await
         }
         Commands::List => tool.list(),
+        Commands::ListRemote(list_remote_args) => {
+            tool.list_remote(&list_remote_args.sock_addr).await
+        }
+        Commands::Listen(listen_args) => {
+            init_logger(log_level);
+            tool.listen(&listen_args.sock_addr).await
+        }
     };
 
     match result {
