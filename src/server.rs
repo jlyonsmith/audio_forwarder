@@ -1,20 +1,23 @@
+use crate::StreamConfig;
 pub use crate::{audio_caps::AudioCaps, messages::NetworkMessage, udp_server::UdpServer};
+use anyhow::{bail, Context};
+use cpal::{traits::DeviceTrait, SampleFormat};
 use env_logger::Env;
 use futures::{SinkExt, StreamExt};
 use log::{error, info, LevelFilter};
 use rmp_serde::to_vec;
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, str::FromStr, sync::Arc};
 use tokio::{
-    net::{TcpListener, TcpStream},
+    net::{TcpListener, TcpStream, UdpSocket},
     select, signal,
     sync::Mutex,
-    task,
     task::JoinHandle,
 };
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 pub struct Server {
-    task_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+    // TODO @john: Add on send task and one receive task
+    task_handle: Arc<Mutex<Option<JoinHandle<Result<(), anyhow::Error>>>>>,
 }
 
 impl Server {
@@ -26,10 +29,11 @@ impl Server {
         }
     }
 
-    async fn handle_connection(&self, socket: TcpStream) -> anyhow::Result<()> {
-        let mut framed = Framed::new(socket, LengthDelimitedCodec::new());
+    async fn handle_connection(&self, socket: &mut TcpStream) -> anyhow::Result<()> {
+        let remote_addr = socket.peer_addr()?;
+        let mut framed = Framed::new(&mut *socket, LengthDelimitedCodec::new());
 
-        // Process all the messages from the stream
+        // TODO @john: Process just one message from the stream
         while let Some(result) = framed.next().await {
             let frame = result?;
 
@@ -39,7 +43,7 @@ impl Server {
             // Match on the deserialized enum
             match message {
                 NetworkMessage::List => {
-                    info!("Handling list remote message");
+                    info!("Handling list remote message from {}", remote_addr);
                     let output = AudioCaps::list_to_string().unwrap();
                     let list_remote_response_message = NetworkMessage::ListResponse { output };
 
@@ -50,49 +54,133 @@ impl Server {
                 NetworkMessage::SendAudio {
                     host,
                     device,
-                    stream_config,
+                    config,
+                    udp_addr,
                 } => {
-                    info!("Handling send audio to remote message");
+                    info!("Handling send audio remote message from {}", remote_addr);
 
-                    // TODO @john: Look up the host/device/stream config
-                    // TODO @john: Respond with the actual host/device/stream information or error message
+                    let stream_config = config.and_then(|s| StreamConfig::from_str(&s).ok());
+                    let (actual_device, actual_config) =
+                        AudioCaps::get_input_device_config(&host, &device, &stream_config)?;
+                    let local_udp_socket = UdpSocket::bind("0.0.0.0:0")
+                        .await
+                        .context("Failed to bind UDP socket")?;
+                    let remote_udp_addr = SocketAddr::from_str(&udp_addr)?;
+
+                    info!(
+                        "Receiving local input audio device {} -> {} -> {} and sending to udp://{}",
+                        host,
+                        actual_device.name().unwrap(),
+                        StreamConfig::to_config_string(&actual_config),
+                        remote_udp_addr
+                    );
+
+                    let message = NetworkMessage::SendAudioResponse {
+                        actual_host: host,
+                        actual_device: actual_device.name().unwrap(),
+                        actual_config: StreamConfig::to_config_string(&actual_config),
+                    };
+
+                    framed.send(to_vec(&message)?.into()).await?;
 
                     {
                         let mut handle_lock = self.task_handle.lock().await;
 
+                        // Kill the previous task if it exists
                         if let Some(ref mut join_handle) = *handle_lock {
                             join_handle.abort();
                         }
 
-                        *handle_lock = Some(task::spawn(async {
-                            //UdpServer::new().send_audio(sock_addr, device, supported_config);
-                        }));
+                        // TODO @john: Use a LocalSet here to spawn the UdpServers in this thread as they are !Send Futures
+
+                        let mut udp_server = UdpServer::new();
+                        // TODO @john: Move all these generics inside a function
+                        match actual_config.sample_format() {
+                            SampleFormat::F32 => {
+                                udp_server
+                                    .send_audio::<f32>(
+                                        &local_udp_socket,
+                                        &remote_udp_addr,
+                                        &actual_device,
+                                        &actual_config,
+                                    )
+                                    .await?;
+                            }
+                            SampleFormat::I16 => {
+                                udp_server
+                                    .send_audio::<i16>(
+                                        &local_udp_socket,
+                                        &remote_udp_addr,
+                                        &actual_device,
+                                        &actual_config,
+                                    )
+                                    .await?;
+                            }
+                            SampleFormat::U16 => {
+                                udp_server
+                                    .send_audio::<u16>(
+                                        &local_udp_socket,
+                                        &remote_udp_addr,
+                                        &actual_device,
+                                        &actual_config,
+                                    )
+                                    .await?;
+                            }
+                            _ => bail!("Unsupported sample format"),
+                        }
                     }
                 }
                 NetworkMessage::ReceiveAudio {
                     host,
                     device,
-                    stream_config,
+                    config,
                 } => {
-                    info!("Handling receive audio to remote message");
+                    info!("Handling receive audio from remote message");
 
-                    // TODO @john: Look up the host/device/stream config
-                    // TODO @john: Respond with the actual host/device/stream information or error message
+                    let config = config.and_then(|s| StreamConfig::from_str(&s).ok());
+                    let (actual_device, actual_config) =
+                        AudioCaps::get_output_device_config(&host, &device, &config)?;
+                    let local_udp_socket = UdpSocket::bind("0.0.0.0:0")
+                        .await
+                        .context("Failed to bind UDP socket")?;
+
+                    info!(
+                        "Receiving audio on udp://{} and sending to local output device {} -> {} -> {}",
+                        local_udp_socket.local_addr()?,
+                        host,
+                        actual_device.name().unwrap(),
+                        StreamConfig::to_config_string(&actual_config),
+                    );
+
+                    let message = NetworkMessage::SendAudioResponse {
+                        actual_host: host,
+                        actual_device: actual_device.name().unwrap(),
+                        actual_config: StreamConfig::to_config_string(&actual_config),
+                    };
+
+                    framed.send(to_vec(&message)?.into()).await?;
 
                     {
                         let mut handle_lock = self.task_handle.lock().await;
 
+                        // Kill the previous task if it exists
                         if let Some(ref mut join_handle) = *handle_lock {
                             join_handle.abort();
                         }
 
-                        let join_handle = task::spawn(async {
-                            UdpServer::new()
-                                .send_audio(sock_addr, device, supported_config)
-                                .await;
-                        });
-
-                        *handle_lock = Some(join_handle);
+                        let mut udp_server = UdpServer::new();
+                        match actual_config.sample_format() {
+                            SampleFormat::F32 => {
+                                udp_server
+                                    .receive_audio::<f32>(
+                                        &local_udp_socket,
+                                        &actual_device,
+                                        &actual_config,
+                                    )
+                                    .await?;
+                            }
+                            _ => bail!("Unsupported output format"),
+                        }
                     }
                 }
                 _ => {
@@ -111,17 +199,16 @@ impl Server {
         info!("Server listening on {}", sock_addr);
 
         loop {
-            // TODO @john: Create a signal that can be used to stop the server
-
             select! {
-                Ok((socket, addr)) = listener.accept() => {
+                Ok((mut socket, addr)) = listener.accept() => {
                     info!("Accepted connection from {}", addr);
-                    match self.handle_connection(socket).await {
+                    match self.handle_connection(&mut socket).await {
                         Ok(_) => {}
                         Err(e) => error!("Error handling connection: {}", e),
                     }
                 }
                 _ = signal::ctrl_c() => {
+                    // TODO @john: Create a signal that can be used to stop any running tasks
                     info!("Stopping server");
                     break;
                 }

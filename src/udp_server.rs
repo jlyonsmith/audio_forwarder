@@ -1,4 +1,3 @@
-use anyhow::Context;
 use cpal::{
     traits::{DeviceTrait, StreamTrait},
     Device, FromSample, InputCallbackInfo, OutputCallbackInfo, Sample, SizedSample,
@@ -8,20 +7,27 @@ use dasp_sample::ToSample;
 use log::{debug, error, info, warn};
 use std::{
     collections::VecDeque,
+    net::SocketAddr,
     sync::{Arc, Mutex},
 };
 use tokio::{net::UdpSocket, select, signal, sync::Notify};
 
-pub struct UdpServer {}
+pub struct UdpServer {
+    audio_buffer: Arc<Mutex<VecDeque<f32>>>,
+}
 
 impl UdpServer {
     pub fn new() -> UdpServer {
-        UdpServer {}
+        UdpServer {
+            //TODO @john: Make configurable size
+            audio_buffer: Arc::new(Mutex::new(VecDeque::with_capacity(1024 * 16))),
+        }
     }
 
     pub async fn send_audio<T>(
-        &self,
-        sock_addr: &std::net::SocketAddr,
+        &mut self,
+        socket: &UdpSocket,
+        sock_addr: &SocketAddr,
         device: &Device,
         supported_config: &SupportedStreamConfig,
     ) -> Result<(), anyhow::Error>
@@ -30,14 +36,8 @@ impl UdpServer {
     {
         let config = supported_config.config();
         let channels = supported_config.channels() as usize;
-        // TODO @john: Make configurable
-        let audio_buffer: Arc<Mutex<VecDeque<f32>>> =
-            Arc::new(Mutex::new(VecDeque::with_capacity(10000 * channels)));
-        let audio_buffer_clone = audio_buffer.clone();
+        let audio_buffer_clone = self.audio_buffer.clone();
         // TODO @john: Pass this in
-        let socket = UdpSocket::bind("0.0.0.0:0")
-            .await
-            .context("Failed to bind UDP socket and port")?;
         let mut sequence_number = 0u64;
         let notify = Arc::new(Notify::new());
         let notify_clone = notify.clone();
@@ -80,7 +80,7 @@ impl UdpServer {
             notify.notified().await;
 
             {
-                let mut audio_buffer = audio_buffer.lock().unwrap();
+                let mut audio_buffer = self.audio_buffer.lock().unwrap();
 
                 debug!(
                     "Audio buffer size: {} ({:.2}%)",
@@ -122,8 +122,8 @@ impl UdpServer {
     }
 
     pub async fn receive_audio<T>(
-        &self,
-        sock_addr: &std::net::SocketAddr,
+        &mut self,
+        socket: &UdpSocket,
         device: &Device,
         supported_config: &SupportedStreamConfig,
     ) -> anyhow::Result<()>
@@ -131,15 +131,8 @@ impl UdpServer {
         T: SizedSample + FromSample<f32>,
     {
         let config = supported_config.config();
-        let channels = supported_config.channels() as usize;
-        // TODO @john: Make audio buffer size configurable
-        let audio_buffer: Arc<Mutex<VecDeque<f32>>> =
-            Arc::new(Mutex::new(VecDeque::with_capacity(120000 * channels)));
-        let audio_buffer_clone = audio_buffer.clone();
+        let audio_buffer_clone = self.audio_buffer.clone();
         let mut packet_buffer = vec![0u8; crate::MTU];
-        let socket = UdpSocket::bind(sock_addr)
-            .await
-            .context("Failed to bind UDP socket")?;
         let stream = device.build_output_stream(
             &config,
             move |output: &mut [T], _: &OutputCallbackInfo| {
@@ -167,10 +160,10 @@ impl UdpServer {
             None,
         )?;
 
+        stream.play()?;
+
         let sequence_number: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
         let mut packet_length = 0;
-
-        stream.play()?;
 
         loop {
             select! {
@@ -223,7 +216,7 @@ impl UdpServer {
                 }
 
                 {
-                    let mut audio_buffer = audio_buffer.lock().unwrap();
+                    let mut audio_buffer = self.audio_buffer.lock().unwrap();
                     let audio_data_chunks = audio_data.chunks_exact(size_of::<f32>());
                     let mut audio_buffer_shrunk = false;
 

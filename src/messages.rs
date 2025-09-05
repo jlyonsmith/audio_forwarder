@@ -6,30 +6,30 @@ pub enum NetworkMessage {
     List,
     /// Response to List message
     ListResponse { output: String },
-    /// Request server to send audio to a host
+    /// Request server to read a local input audio device and send to a remote computer
     SendAudio {
         host: String,
         device: Option<String>,
-        stream_config: Option<String>,
+        config: Option<String>,
+        udp_addr: String,
     },
     /// Response to SendAudio message
     SendAudioResponse {
-        host: String,
-        device: String,
-        stream_config: String,
-        udp_addr: String,
+        actual_host: String,
+        actual_device: String,
+        actual_config: String,
     },
-    /// Request server to receive audio from a host
+    /// Request server to receive audio from a remote computer and send to local output audio device
     ReceiveAudio {
         host: String,
         device: Option<String>,
-        stream_config: Option<String>,
+        config: Option<String>,
     },
     /// Response to ReceiveAudio message
     ReceiveAudioResponse {
-        host: String,
-        device: String,
-        stream_config: String,
+        actual_host: String,
+        actual_device: String,
+        actual_config: String,
         udp_addr: String,
     },
 }

@@ -9,7 +9,10 @@ use futures::{SinkExt, StreamExt};
 use log::{info, LevelFilter};
 use rmp_serde::to_vec;
 use std::net::SocketAddr;
-use tokio::{net::TcpStream, time::timeout};
+use tokio::{
+    net::{TcpStream, UdpSocket},
+    time::timeout,
+};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 // TODO @john: Make this configurable
@@ -52,78 +55,25 @@ impl Client {
     pub async fn receive(
         &self,
         sock_addr: &SocketAddr,
-        host: &str,
-        device: &Option<String>,
-        stream_config: &Option<StreamConfig>,
-    ) -> anyhow::Result<()> {
-        let (device, config) = AudioCaps::get_output_device_config(host, device, stream_config)?;
-
-        info!(
-            "Listening at {} for requests to receive audio and forward to {} -> {} -> {} channel{} at {} Hz",
-            sock_addr,
-            host,
-            device.name().unwrap_or("Unknown".to_string()),
-            config.channels(),
-            if config.channels() == 1 { "" } else { "s" },
-            config.sample_rate().0,
-        );
-
-        let server = UdpServer::new();
-
-        match config.sample_format() {
-            SampleFormat::F32 => {
-                server
-                    .receive_audio::<f32>(sock_addr, &device, &config)
-                    .await?
-            }
-            SampleFormat::I16 => {
-                server
-                    .receive_audio::<i16>(sock_addr, &device, &config)
-                    .await?
-            }
-            SampleFormat::U16 => {
-                server
-                    .receive_audio::<u16>(sock_addr, &device, &config)
-                    .await?
-            }
-            _ => panic!("Unsupported sample format on output device"),
-        }
-
-        Ok(())
-    }
-
-    pub async fn send(
-        &self,
-        sock_addr: &SocketAddr,
-        input_host: &str,
-        input_device: &Option<String>,
-        input_stream_config: &Option<StreamConfig>,
         output_host: &str,
         output_device: &Option<String>,
         output_stream_config: &Option<StreamConfig>,
+        input_host: &str,
+        input_device: &Option<String>,
+        input_stream_config: &Option<StreamConfig>,
     ) -> anyhow::Result<()> {
-        let (local_device, local_config) =
-            AudioCaps::get_input_device_config(input_host, input_device, input_stream_config)?;
-
-        info!(
-            "Receiving local audio from input device {} -> {} -> {} channel{} at {} Hz",
-            input_host,
-            local_device.name().unwrap_or("Unknown".to_string()),
-            local_config.channels(),
-            if local_config.channels() == 1 {
-                ""
-            } else {
-                "s"
-            },
-            local_config.sample_rate().0,
-        );
-
+        let (actual_output_device, actual_output_config) =
+            AudioCaps::get_output_device_config(output_host, output_device, output_stream_config)?;
         let socket = TcpStream::connect(sock_addr).await?;
+        let udp_socket = UdpSocket::bind("0.0.0.0:0")
+            .await
+            .context("Failed to bind UDP socket")?;
         let mut framed = Framed::new(socket, LengthDelimitedCodec::new());
-        let message = NetworkMessage::ReceiveAudio {
-            host: output_host.to_string(),
-            device: output_device.clone(),
-            stream_config: output_stream_config.as_ref().map(|x| x.to_string()),
+        let message = NetworkMessage::SendAudio {
+            host: input_host.to_string(),
+            device: input_device.clone(),
+            config: input_stream_config.as_ref().map(|x| x.to_string()),
+            udp_addr: udp_socket.local_addr()?.to_string(),
         };
 
         framed.send(to_vec(&message)?.into()).await?;
@@ -134,43 +84,147 @@ impl Client {
         {
             let frame = result?;
             let message = rmp_serde::from_slice::<NetworkMessage>(&frame)?;
-            let server = UdpServer::new();
 
             match message {
-                NetworkMessage::ReceiveAudioResponse {
-                    host: remote_host,
-                    device: remote_device,
-                    stream_config,
-                    udp_addr: addr,
+                NetworkMessage::SendAudioResponse {
+                    actual_host: actual_remote_host,
+                    actual_device: actual_remote_device,
+                    actual_config: actual_remote_config,
                 } => {
-                    let config: StreamConfig = stream_config.parse()?;
-                    let udp_addr = addr.parse()?;
-
                     info!(
-                        "Forwarding audio via {} to output device {} -> {} -> {} channel{} at {} Hz",
-                        udp_addr,
-                        remote_host,
-                        remote_device,
-                        config.channels,
-                        if config.channels == 1 { "" } else { "s" },
-                        config.sample_rate,
+                        "Receiving local input audio from {} -> {} -> {} and sending to udp://{} then forwarding to local output device {} -> {} -> {}",
+                        actual_remote_host,
+                        actual_remote_device,
+                        actual_remote_config,
+                        udp_socket.local_addr()?.to_string(),
+                        output_host,
+                        actual_output_device.name().unwrap_or("Unknown".to_string()),
+                        StreamConfig::to_config_string(&actual_output_config),
                     );
 
-                    // TODO @john: Add matches for all the supported sample formats
-                    match local_config.sample_format() {
+                    let mut udp_server = UdpServer::new();
+
+                    match actual_output_config.sample_format() {
                         SampleFormat::F32 => {
-                            server
-                                .send_audio::<f32>(&udp_addr, &local_device, &local_config)
+                            udp_server
+                                .receive_audio::<f32>(
+                                    &udp_socket,
+                                    &actual_output_device,
+                                    &actual_output_config,
+                                )
                                 .await?
                         }
                         SampleFormat::I16 => {
-                            server
-                                .send_audio::<i16>(&udp_addr, &local_device, &local_config)
+                            udp_server
+                                .receive_audio::<i16>(
+                                    &udp_socket,
+                                    &actual_output_device,
+                                    &actual_output_config,
+                                )
                                 .await?
                         }
                         SampleFormat::U16 => {
-                            server
-                                .send_audio::<u16>(&udp_addr, &local_device, &local_config)
+                            udp_server
+                                .receive_audio::<u16>(
+                                    &udp_socket,
+                                    &actual_output_device,
+                                    &actual_output_config,
+                                )
+                                .await?
+                        }
+                        _ => bail!("Unsupported sample format on output device"),
+                    }
+                }
+                _ => bail!("Unexpected response from remote"),
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn send(
+        &self,
+        sock_addr: &SocketAddr,
+        input_host: &str,
+        input_device: &Option<String>,
+        input_config: &Option<StreamConfig>,
+        output_host: &str,
+        output_device: &Option<String>,
+        output_config: &Option<StreamConfig>,
+    ) -> anyhow::Result<()> {
+        let (actual_input_device, actual_input_config) =
+            AudioCaps::get_input_device_config(input_host, input_device, input_config)?;
+        let socket = TcpStream::connect(sock_addr).await?;
+        let udp_socket = UdpSocket::bind("0.0.0.0:0").await?;
+        let mut framed = Framed::new(socket, LengthDelimitedCodec::new());
+        let message = NetworkMessage::ReceiveAudio {
+            host: output_host.to_string(),
+            device: output_device.clone(),
+            config: output_config.as_ref().map(|x| x.to_string()),
+        };
+
+        framed.send(to_vec(&message)?.into()).await?;
+
+        if let Some(result) = timeout(crate::SERVER_TIMEOUT, framed.next())
+            .await
+            .context("Timed out waiting for response from server")?
+        {
+            let frame = result?;
+            let message = rmp_serde::from_slice::<NetworkMessage>(&frame)?;
+
+            match message {
+                NetworkMessage::ReceiveAudioResponse {
+                    actual_host: actual_remote_host,
+                    actual_device: actual_remote_device,
+                    actual_config: actual_remote_config,
+                    udp_addr,
+                } => {
+                    let actual_remote_config: StreamConfig = actual_remote_config.parse()?;
+                    let remote_udp_addr: SocketAddr = udp_addr.parse()?;
+
+                    info!(
+                        "Receiving local input audio from {} -> {} -> {} and sending to udp://{} then forwarding to remote output audio {} -> {} -> {}",
+                        input_host,
+                        actual_input_device.name().unwrap(),
+                        StreamConfig::to_config_string(&actual_input_config),
+                        remote_udp_addr,
+                        actual_remote_host,
+                        actual_remote_device,
+                        actual_remote_config.to_string()
+                    );
+
+                    let mut udp_server = UdpServer::new();
+
+                    // TODO @john: Add matches for all the supported sample formats
+                    match actual_input_config.sample_format() {
+                        SampleFormat::F32 => {
+                            udp_server
+                                .send_audio::<f32>(
+                                    &udp_socket,
+                                    &remote_udp_addr,
+                                    &actual_input_device,
+                                    &actual_input_config,
+                                )
+                                .await?
+                        }
+                        SampleFormat::I16 => {
+                            udp_server
+                                .send_audio::<i16>(
+                                    &udp_socket,
+                                    &remote_udp_addr,
+                                    &actual_input_device,
+                                    &actual_input_config,
+                                )
+                                .await?
+                        }
+                        SampleFormat::U16 => {
+                            udp_server
+                                .send_audio::<u16>(
+                                    &udp_socket,
+                                    &remote_udp_addr,
+                                    &actual_input_device,
+                                    &actual_input_config,
+                                )
                                 .await?
                         }
                         _ => bail!("Unsupported sample format on input device"),

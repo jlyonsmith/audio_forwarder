@@ -1,4 +1,4 @@
-use cpal::SampleFormat;
+use cpal::{SampleFormat, SupportedStreamConfig};
 use std::{fmt::Display, str::FromStr};
 
 #[derive(Debug, Clone)]
@@ -62,6 +62,17 @@ impl Display for StreamConfig {
             self.channels,
             Self::format_as_khz(self.sample_rate),
             self.sample_format
+        )
+    }
+}
+
+impl StreamConfig {
+    pub fn to_config_string(stream_config: &SupportedStreamConfig) -> String {
+        format!(
+            "{}x{}x{}",
+            stream_config.channels(),
+            Self::format_as_khz(stream_config.sample_rate().0),
+            stream_config.sample_format()
         )
     }
 }
