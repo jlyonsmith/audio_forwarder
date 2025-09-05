@@ -9,6 +9,7 @@ use rmp_serde::to_vec;
 use std::{net::SocketAddr, str::FromStr};
 use tokio::{
     net::{TcpListener, TcpStream, UdpSocket},
+    runtime::Runtime,
     select, signal,
 };
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
@@ -76,13 +77,20 @@ impl Server {
 
                     framed.send(to_vec(&message)?.into()).await?;
 
-                    UdpServer::send_audio(
-                        local_udp_socket,
-                        remote_udp_addr,
-                        actual_device,
-                        actual_config,
-                    )
-                    .await?;
+                    let _handle = std::thread::spawn(move || {
+                        // cpal::Stream is !Send so we must use a dedicated thread for the UdpServer
+                        let rt = Runtime::new().unwrap();
+                        rt.block_on(async {
+                            UdpServer::send_audio(
+                                local_udp_socket,
+                                remote_udp_addr,
+                                actual_device,
+                                actual_config,
+                            )
+                            .await
+                            .ok();
+                        });
+                    });
                 }
                 NetworkMessage::ReceiveAudio {
                     host,
@@ -114,9 +122,19 @@ impl Server {
 
                     framed.send(to_vec(&message)?.into()).await?;
 
-                    UdpServer::receive_audio(local_udp_socket, actual_device, actual_config)
-                        .await
-                        .ok();
+                    let _handle = std::thread::spawn(move || {
+                        // cpal::Stream is !Send so we must use a dedicated thread for the UdpServer
+                        let rt = Runtime::new().unwrap();
+                        rt.block_on(async {
+                            UdpServer::receive_audio(
+                                local_udp_socket,
+                                actual_device,
+                                actual_config,
+                            )
+                            .await
+                            .ok();
+                        });
+                    });
                 }
                 _ => {
                     error!("Unexpected message");
