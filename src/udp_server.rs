@@ -1,6 +1,7 @@
+use anyhow::bail;
 use cpal::{
     traits::{DeviceTrait, StreamTrait},
-    Device, FromSample, InputCallbackInfo, OutputCallbackInfo, Sample, SizedSample,
+    Device, FromSample, InputCallbackInfo, OutputCallbackInfo, Sample, SampleFormat, SizedSample,
     SupportedStreamConfig,
 };
 use dasp_sample::ToSample;
@@ -15,17 +16,37 @@ use tokio::{net::UdpSocket, select, signal, sync::Notify};
 pub struct UdpServer {}
 
 impl UdpServer {
-    pub async fn send_audio<T>(
+    pub async fn send_audio(
+        socket: UdpSocket,
+        sock_addr: SocketAddr,
+        device: Device,
+        config: SupportedStreamConfig,
+    ) -> Result<(), anyhow::Error> {
+        match config.sample_format() {
+            SampleFormat::F32 => {
+                Self::gen_send_audio::<f32>(&socket, &sock_addr, &device, &config).await
+            }
+            SampleFormat::I16 => {
+                Self::gen_send_audio::<i16>(&socket, &sock_addr, &device, &config).await
+            }
+            SampleFormat::U16 => {
+                Self::gen_send_audio::<u16>(&socket, &sock_addr, &device, &config).await
+            }
+            _ => bail!("Unsupported sample format on input device"),
+        }
+    }
+
+    async fn gen_send_audio<T>(
         socket: &UdpSocket,
         sock_addr: &SocketAddr,
         device: &Device,
-        supported_config: &SupportedStreamConfig,
+        config: &SupportedStreamConfig,
     ) -> Result<(), anyhow::Error>
     where
         T: SizedSample + Sample + ToSample<f32>,
     {
-        let config = supported_config.config();
-        let channels = supported_config.channels() as usize;
+        let supported_config = config.config();
+        let channels = config.channels() as usize;
         // TODO @john: Pass this in
         let mut sequence_number = 0u64;
         let notify = Arc::new(Notify::new());
@@ -34,7 +55,7 @@ impl UdpServer {
         let audio_buffer = Arc::new(Mutex::new(VecDeque::with_capacity(1024 * 16)));
         let audio_buffer_clone = audio_buffer.clone();
         let stream = device.build_input_stream(
-            &config,
+            &supported_config,
             move |input: &[T], _: &InputCallbackInfo| {
                 let mut audio_buffer = audio_buffer_clone.lock().unwrap();
                 let mut audio_buffer_shrunk = false;
@@ -112,15 +133,28 @@ impl UdpServer {
         }
     }
 
-    pub async fn receive_audio<T>(
+    pub async fn receive_audio(
+        socket: UdpSocket,
+        device: Device,
+        config: SupportedStreamConfig,
+    ) -> anyhow::Result<()> {
+        match config.sample_format() {
+            SampleFormat::F32 => Self::gen_receive_audio::<f32>(&socket, &device, &config).await,
+            SampleFormat::I16 => Self::gen_receive_audio::<i16>(&socket, &device, &config).await,
+            SampleFormat::U16 => Self::gen_receive_audio::<u16>(&socket, &device, &config).await,
+            _ => bail!("Unsupported sample format on output device"),
+        }
+    }
+
+    pub async fn gen_receive_audio<T>(
         socket: &UdpSocket,
         device: &Device,
-        supported_config: &SupportedStreamConfig,
+        config: &SupportedStreamConfig,
     ) -> anyhow::Result<()>
     where
         T: SizedSample + FromSample<f32>,
     {
-        let config = supported_config.config();
+        let config = config.config();
         let mut packet_buffer = vec![0u8; crate::MTU];
         let audio_buffer = Arc::new(Mutex::new(VecDeque::with_capacity(1024 * 16)));
         let audio_buffer_clone = audio_buffer.clone();

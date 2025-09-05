@@ -1,7 +1,7 @@
 use crate::StreamConfig;
 pub use crate::{audio_caps::AudioCaps, messages::NetworkMessage, udp_server::UdpServer};
-use anyhow::{bail, Context};
-use cpal::{traits::DeviceTrait, SampleFormat};
+use anyhow::Context;
+use cpal::traits::DeviceTrait;
 use env_logger::Env;
 use futures::{SinkExt, StreamExt};
 use log::{error, info, LevelFilter};
@@ -91,39 +91,13 @@ impl Server {
                             join_handle.abort();
                         }
 
-                        // TODO @john: Use a LocalSet here to spawn the UdpServers in this thread as they are !Send Futures
-
-                        // TODO @john: Move all these generics inside a function
-                        match actual_config.sample_format() {
-                            SampleFormat::F32 => {
-                                UdpServer::send_audio::<f32>(
-                                    &local_udp_socket,
-                                    &remote_udp_addr,
-                                    &actual_device,
-                                    &actual_config,
-                                )
-                                .await?;
-                            }
-                            SampleFormat::I16 => {
-                                UdpServer::send_audio::<i16>(
-                                    &local_udp_socket,
-                                    &remote_udp_addr,
-                                    &actual_device,
-                                    &actual_config,
-                                )
-                                .await?;
-                            }
-                            SampleFormat::U16 => {
-                                UdpServer::send_audio::<u16>(
-                                    &local_udp_socket,
-                                    &remote_udp_addr,
-                                    &actual_device,
-                                    &actual_config,
-                                )
-                                .await?;
-                            }
-                            _ => bail!("Unsupported sample format"),
-                        }
+                        UdpServer::send_audio(
+                            local_udp_socket,
+                            remote_udp_addr,
+                            actual_device,
+                            actual_config,
+                        )
+                        .await?;
                     }
                 }
                 NetworkMessage::ReceiveAudio {
@@ -164,17 +138,8 @@ impl Server {
                             join_handle.abort();
                         }
 
-                        match actual_config.sample_format() {
-                            SampleFormat::F32 => {
-                                UdpServer::receive_audio::<f32>(
-                                    &local_udp_socket,
-                                    &actual_device,
-                                    &actual_config,
-                                )
-                                .await?;
-                            }
-                            _ => bail!("Unsupported output format"),
-                        }
+                        UdpServer::receive_audio(local_udp_socket, actual_device, actual_config)
+                            .await?;
                     }
                 }
                 _ => {

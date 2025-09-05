@@ -3,7 +3,7 @@ use crate::{
     udp_server::UdpServer,
 };
 use anyhow::{bail, Context};
-use cpal::{traits::DeviceTrait, SampleFormat};
+use cpal::traits::DeviceTrait;
 use env_logger::Env;
 use futures::{SinkExt, StreamExt};
 use log::{info, LevelFilter};
@@ -92,7 +92,7 @@ impl Client {
                     actual_config: actual_remote_config,
                 } => {
                     info!(
-                        "Receiving local input audio from {} -> {} -> {} and sending to udp://{} then forwarding to local output device {} -> {} -> {}",
+                        "Capturing remote input audio from {} -> {} -> {}, receiving on udp://{} and forwarding to local output device {} -> {} -> {}",
                         actual_remote_host,
                         actual_remote_device,
                         actual_remote_config,
@@ -102,33 +102,12 @@ impl Client {
                         StreamConfig::to_config_string(&actual_output_config),
                     );
 
-                    match actual_output_config.sample_format() {
-                        SampleFormat::F32 => {
-                            UdpServer::receive_audio::<f32>(
-                                &udp_socket,
-                                &actual_output_device,
-                                &actual_output_config,
-                            )
-                            .await?
-                        }
-                        SampleFormat::I16 => {
-                            UdpServer::receive_audio::<i16>(
-                                &udp_socket,
-                                &actual_output_device,
-                                &actual_output_config,
-                            )
-                            .await?
-                        }
-                        SampleFormat::U16 => {
-                            UdpServer::receive_audio::<u16>(
-                                &udp_socket,
-                                &actual_output_device,
-                                &actual_output_config,
-                            )
-                            .await?
-                        }
-                        _ => bail!("Unsupported sample format on output device"),
-                    }
+                    UdpServer::receive_audio(
+                        udp_socket,
+                        actual_output_device,
+                        actual_output_config,
+                    )
+                    .await?;
                 }
                 _ => bail!("Unexpected response from remote"),
             }
@@ -178,7 +157,7 @@ impl Client {
                     let remote_udp_addr: SocketAddr = udp_addr.parse()?;
 
                     info!(
-                        "Receiving local input audio from {} -> {} -> {} and sending to udp://{} then forwarding to remote output audio {} -> {} -> {}",
+                        "Capturing local input audio from {} -> {} -> {}, sending to udp://{} then forwarding to remote output audio {} -> {} -> {}",
                         input_host,
                         actual_input_device.name().unwrap(),
                         StreamConfig::to_config_string(&actual_input_config),
@@ -188,37 +167,13 @@ impl Client {
                         actual_remote_config.to_string()
                     );
 
-                    // TODO @john: Add matches for all the supported sample formats
-                    match actual_input_config.sample_format() {
-                        SampleFormat::F32 => {
-                            UdpServer::send_audio::<f32>(
-                                &udp_socket,
-                                &remote_udp_addr,
-                                &actual_input_device,
-                                &actual_input_config,
-                            )
-                            .await?
-                        }
-                        SampleFormat::I16 => {
-                            UdpServer::send_audio::<i16>(
-                                &udp_socket,
-                                &remote_udp_addr,
-                                &actual_input_device,
-                                &actual_input_config,
-                            )
-                            .await?
-                        }
-                        SampleFormat::U16 => {
-                            UdpServer::send_audio::<u16>(
-                                &udp_socket,
-                                &remote_udp_addr,
-                                &actual_input_device,
-                                &actual_input_config,
-                            )
-                            .await?
-                        }
-                        _ => bail!("Unsupported sample format on input device"),
-                    }
+                    UdpServer::send_audio(
+                        udp_socket,
+                        remote_udp_addr,
+                        actual_input_device,
+                        actual_input_config,
+                    )
+                    .await?;
                 }
                 _ => bail!("Unexpected response from remote"),
             }
