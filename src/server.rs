@@ -93,38 +93,34 @@ impl Server {
 
                         // TODO @john: Use a LocalSet here to spawn the UdpServers in this thread as they are !Send Futures
 
-                        let mut udp_server = UdpServer::new();
                         // TODO @john: Move all these generics inside a function
                         match actual_config.sample_format() {
                             SampleFormat::F32 => {
-                                udp_server
-                                    .send_audio::<f32>(
-                                        &local_udp_socket,
-                                        &remote_udp_addr,
-                                        &actual_device,
-                                        &actual_config,
-                                    )
-                                    .await?;
+                                UdpServer::send_audio::<f32>(
+                                    &local_udp_socket,
+                                    &remote_udp_addr,
+                                    &actual_device,
+                                    &actual_config,
+                                )
+                                .await?;
                             }
                             SampleFormat::I16 => {
-                                udp_server
-                                    .send_audio::<i16>(
-                                        &local_udp_socket,
-                                        &remote_udp_addr,
-                                        &actual_device,
-                                        &actual_config,
-                                    )
-                                    .await?;
+                                UdpServer::send_audio::<i16>(
+                                    &local_udp_socket,
+                                    &remote_udp_addr,
+                                    &actual_device,
+                                    &actual_config,
+                                )
+                                .await?;
                             }
                             SampleFormat::U16 => {
-                                udp_server
-                                    .send_audio::<u16>(
-                                        &local_udp_socket,
-                                        &remote_udp_addr,
-                                        &actual_device,
-                                        &actual_config,
-                                    )
-                                    .await?;
+                                UdpServer::send_audio::<u16>(
+                                    &local_udp_socket,
+                                    &remote_udp_addr,
+                                    &actual_device,
+                                    &actual_config,
+                                )
+                                .await?;
                             }
                             _ => bail!("Unsupported sample format"),
                         }
@@ -168,16 +164,14 @@ impl Server {
                             join_handle.abort();
                         }
 
-                        let mut udp_server = UdpServer::new();
                         match actual_config.sample_format() {
                             SampleFormat::F32 => {
-                                udp_server
-                                    .receive_audio::<f32>(
-                                        &local_udp_socket,
-                                        &actual_device,
-                                        &actual_config,
-                                    )
-                                    .await?;
+                                UdpServer::receive_audio::<f32>(
+                                    &local_udp_socket,
+                                    &actual_device,
+                                    &actual_config,
+                                )
+                                .await?;
                             }
                             _ => bail!("Unsupported output format"),
                         }

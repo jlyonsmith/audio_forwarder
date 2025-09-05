@@ -102,35 +102,30 @@ impl Client {
                         StreamConfig::to_config_string(&actual_output_config),
                     );
 
-                    let mut udp_server = UdpServer::new();
-
                     match actual_output_config.sample_format() {
                         SampleFormat::F32 => {
-                            udp_server
-                                .receive_audio::<f32>(
-                                    &udp_socket,
-                                    &actual_output_device,
-                                    &actual_output_config,
-                                )
-                                .await?
+                            UdpServer::receive_audio::<f32>(
+                                &udp_socket,
+                                &actual_output_device,
+                                &actual_output_config,
+                            )
+                            .await?
                         }
                         SampleFormat::I16 => {
-                            udp_server
-                                .receive_audio::<i16>(
-                                    &udp_socket,
-                                    &actual_output_device,
-                                    &actual_output_config,
-                                )
-                                .await?
+                            UdpServer::receive_audio::<i16>(
+                                &udp_socket,
+                                &actual_output_device,
+                                &actual_output_config,
+                            )
+                            .await?
                         }
                         SampleFormat::U16 => {
-                            udp_server
-                                .receive_audio::<u16>(
-                                    &udp_socket,
-                                    &actual_output_device,
-                                    &actual_output_config,
-                                )
-                                .await?
+                            UdpServer::receive_audio::<u16>(
+                                &udp_socket,
+                                &actual_output_device,
+                                &actual_output_config,
+                            )
+                            .await?
                         }
                         _ => bail!("Unsupported sample format on output device"),
                     }
@@ -193,39 +188,34 @@ impl Client {
                         actual_remote_config.to_string()
                     );
 
-                    let mut udp_server = UdpServer::new();
-
                     // TODO @john: Add matches for all the supported sample formats
                     match actual_input_config.sample_format() {
                         SampleFormat::F32 => {
-                            udp_server
-                                .send_audio::<f32>(
-                                    &udp_socket,
-                                    &remote_udp_addr,
-                                    &actual_input_device,
-                                    &actual_input_config,
-                                )
-                                .await?
+                            UdpServer::send_audio::<f32>(
+                                &udp_socket,
+                                &remote_udp_addr,
+                                &actual_input_device,
+                                &actual_input_config,
+                            )
+                            .await?
                         }
                         SampleFormat::I16 => {
-                            udp_server
-                                .send_audio::<i16>(
-                                    &udp_socket,
-                                    &remote_udp_addr,
-                                    &actual_input_device,
-                                    &actual_input_config,
-                                )
-                                .await?
+                            UdpServer::send_audio::<i16>(
+                                &udp_socket,
+                                &remote_udp_addr,
+                                &actual_input_device,
+                                &actual_input_config,
+                            )
+                            .await?
                         }
                         SampleFormat::U16 => {
-                            udp_server
-                                .send_audio::<u16>(
-                                    &udp_socket,
-                                    &remote_udp_addr,
-                                    &actual_input_device,
-                                    &actual_input_config,
-                                )
-                                .await?
+                            UdpServer::send_audio::<u16>(
+                                &udp_socket,
+                                &remote_udp_addr,
+                                &actual_input_device,
+                                &actual_input_config,
+                            )
+                            .await?
                         }
                         _ => bail!("Unsupported sample format on input device"),
                     }

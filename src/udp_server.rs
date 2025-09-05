@@ -12,20 +12,10 @@ use std::{
 };
 use tokio::{net::UdpSocket, select, signal, sync::Notify};
 
-pub struct UdpServer {
-    audio_buffer: Arc<Mutex<VecDeque<f32>>>,
-}
+pub struct UdpServer {}
 
 impl UdpServer {
-    pub fn new() -> UdpServer {
-        UdpServer {
-            //TODO @john: Make configurable size
-            audio_buffer: Arc::new(Mutex::new(VecDeque::with_capacity(1024 * 16))),
-        }
-    }
-
     pub async fn send_audio<T>(
-        &mut self,
         socket: &UdpSocket,
         sock_addr: &SocketAddr,
         device: &Device,
@@ -36,12 +26,13 @@ impl UdpServer {
     {
         let config = supported_config.config();
         let channels = supported_config.channels() as usize;
-        let audio_buffer_clone = self.audio_buffer.clone();
         // TODO @john: Pass this in
         let mut sequence_number = 0u64;
         let notify = Arc::new(Notify::new());
         let notify_clone = notify.clone();
         let mut packet_buffer = Vec::with_capacity(crate::MTU);
+        let audio_buffer = Arc::new(Mutex::new(VecDeque::with_capacity(1024 * 16)));
+        let audio_buffer_clone = audio_buffer.clone();
         let stream = device.build_input_stream(
             &config,
             move |input: &[T], _: &InputCallbackInfo| {
@@ -80,7 +71,7 @@ impl UdpServer {
             notify.notified().await;
 
             {
-                let mut audio_buffer = self.audio_buffer.lock().unwrap();
+                let mut audio_buffer = audio_buffer.lock().unwrap();
 
                 debug!(
                     "Audio buffer size: {} ({:.2}%)",
@@ -122,7 +113,6 @@ impl UdpServer {
     }
 
     pub async fn receive_audio<T>(
-        &mut self,
         socket: &UdpSocket,
         device: &Device,
         supported_config: &SupportedStreamConfig,
@@ -131,8 +121,9 @@ impl UdpServer {
         T: SizedSample + FromSample<f32>,
     {
         let config = supported_config.config();
-        let audio_buffer_clone = self.audio_buffer.clone();
         let mut packet_buffer = vec![0u8; crate::MTU];
+        let audio_buffer = Arc::new(Mutex::new(VecDeque::with_capacity(1024 * 16)));
+        let audio_buffer_clone = audio_buffer.clone();
         let stream = device.build_output_stream(
             &config,
             move |output: &mut [T], _: &OutputCallbackInfo| {
@@ -216,7 +207,7 @@ impl UdpServer {
                 }
 
                 {
-                    let mut audio_buffer = self.audio_buffer.lock().unwrap();
+                    let mut audio_buffer = audio_buffer.lock().unwrap();
                     let audio_data_chunks = audio_data.chunks_exact(size_of::<f32>());
                     let mut audio_buffer_shrunk = false;
 
