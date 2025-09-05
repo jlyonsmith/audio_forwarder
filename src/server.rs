@@ -6,27 +6,20 @@ use env_logger::Env;
 use futures::{SinkExt, StreamExt};
 use log::{error, info, LevelFilter};
 use rmp_serde::to_vec;
-use std::{net::SocketAddr, str::FromStr, sync::Arc};
+use std::{net::SocketAddr, str::FromStr};
 use tokio::{
     net::{TcpListener, TcpStream, UdpSocket},
     select, signal,
-    sync::Mutex,
-    task::JoinHandle,
 };
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
-pub struct Server {
-    // TODO @john: Add on send task and one receive task
-    task_handle: Arc<Mutex<Option<JoinHandle<Result<(), anyhow::Error>>>>>,
-}
+pub struct Server {}
 
 impl Server {
     pub fn new(log_level: LevelFilter) -> Server {
         env_logger::Builder::from_env(Env::default().filter_or("RUST_LOG", log_level.to_string()))
             .init();
-        Server {
-            task_handle: Arc::new(Mutex::new(None)),
-        }
+        Server {}
     }
 
     async fn handle_connection(&self, socket: &mut TcpStream) -> anyhow::Result<()> {
@@ -83,22 +76,13 @@ impl Server {
 
                     framed.send(to_vec(&message)?.into()).await?;
 
-                    {
-                        let mut handle_lock = self.task_handle.lock().await;
-
-                        // Kill the previous task if it exists
-                        if let Some(ref mut join_handle) = *handle_lock {
-                            join_handle.abort();
-                        }
-
-                        UdpServer::send_audio(
-                            local_udp_socket,
-                            remote_udp_addr,
-                            actual_device,
-                            actual_config,
-                        )
-                        .await?;
-                    }
+                    UdpServer::send_audio(
+                        local_udp_socket,
+                        remote_udp_addr,
+                        actual_device,
+                        actual_config,
+                    )
+                    .await?;
                 }
                 NetworkMessage::ReceiveAudio {
                     host,
@@ -130,17 +114,9 @@ impl Server {
 
                     framed.send(to_vec(&message)?.into()).await?;
 
-                    {
-                        let mut handle_lock = self.task_handle.lock().await;
-
-                        // Kill the previous task if it exists
-                        if let Some(ref mut join_handle) = *handle_lock {
-                            join_handle.abort();
-                        }
-
-                        UdpServer::receive_audio(local_udp_socket, actual_device, actual_config)
-                            .await?;
-                    }
+                    UdpServer::receive_audio(local_udp_socket, actual_device, actual_config)
+                        .await
+                        .ok();
                 }
                 _ => {
                     error!("Unexpected message");
