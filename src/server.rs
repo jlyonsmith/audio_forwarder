@@ -76,15 +76,15 @@ impl Server {
             NetworkMessage::SendAudio {
                 host,
                 device,
-                stream_cfg: config,
-                udp_addr,
+                stream_cfg,
+                udp_addr: send_udp_addr,
             } => {
                 info!("Handling send audio remote message from {}", remote_addr);
 
                 let (input_device, input_device_cfg, buffer_frames) = AudioCaps::get_input_device(
                     &host,
                     &device,
-                    &config.and_then(|s| StreamConfig::from_str(&s).ok()),
+                    &stream_cfg.and_then(|s| StreamConfig::from_str(&s).ok()),
                 )?;
 
                 {
@@ -103,7 +103,7 @@ impl Server {
                 let local_udp_socket = UdpSocket::bind(SocketAddr::new(remote_addr.ip(), 0))
                     .await
                     .context("Failed to bind UDP socket")?;
-                let remote_udp_addr = SocketAddr::from_str(&udp_addr)?;
+                let remote_udp_addr = SocketAddr::from_str(&send_udp_addr)?;
 
                 info!(
                     "Receiving local input audio device {} and sending to udp://{}",
@@ -200,21 +200,21 @@ impl Server {
                     }
                 }
 
-                let local_udp_socket = UdpSocket::bind("0.0.0.0:0")
+                let local_udp_socket = UdpSocket::bind(SocketAddr::new(remote_addr.ip(), 0))
                     .await
                     .context("Failed to bind UDP socket")?;
-                let udp_addr = local_udp_socket.local_addr()?;
+                let local_udp_addr = local_udp_socket.local_addr()?;
 
                 info!(
                     "Receiving audio on udp://{} and sending to local output device {}",
-                    udp_addr, output_device_cfg,
+                    local_udp_addr, output_device_cfg,
                 );
 
                 let message = NetworkMessage::ReceiveAudioResponse {
                     actual_host: host,
                     actual_device: output_device_cfg.device_name.to_owned(),
                     actual_stream_cfg: output_device_cfg.stream_cfg.to_string(),
-                    udp_addr: udp_addr.to_string(),
+                    udp_addr: local_udp_addr.to_string(),
                 };
 
                 framed_stream.send(to_vec(&message)?.into()).await?;
