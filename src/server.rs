@@ -210,6 +210,15 @@ impl Server {
                     udp_addr, output_device_cfg,
                 );
 
+                let message = NetworkMessage::ReceiveAudioResponse {
+                    actual_host: host,
+                    actual_device: output_device_cfg.device_name.to_owned(),
+                    actual_stream_cfg: output_device_cfg.stream_cfg.to_string(),
+                    udp_addr: udp_addr.to_string(),
+                };
+
+                framed_stream.send(to_vec(&message)?.into()).await?;
+
                 let cancel_token = CancellationToken::new();
                 let cancel_token_clone = cancel_token.clone();
                 let output_device_cfg_clone = output_device_cfg.clone();
@@ -262,15 +271,6 @@ impl Server {
                         },
                     );
                 }
-
-                let message = NetworkMessage::ReceiveAudioResponse {
-                    actual_host: host,
-                    actual_device: output_device_cfg.device_name.to_owned(),
-                    actual_stream_cfg: output_device_cfg.stream_cfg.to_string(),
-                    udp_addr: udp_addr.to_string(),
-                };
-
-                framed_stream.send(to_vec(&message)?.into()).await?;
 
                 return Ok(());
             }
