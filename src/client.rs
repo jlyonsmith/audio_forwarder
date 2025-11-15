@@ -5,10 +5,11 @@ use crate::{
 use anyhow::{bail, Context};
 use env_logger::Env;
 use futures::{SinkExt, StreamExt};
-use log::{info, LevelFilter};
+use log::{error, info, LevelFilter};
 use rmp_serde::to_vec;
 use std::net::SocketAddr;
 use tokio::{
+    io::AsyncWriteExt,
     net::{TcpStream, UdpSocket},
     time::timeout,
 };
@@ -73,7 +74,7 @@ impl Client {
         let message = NetworkMessage::SendAudio {
             host: input_host.to_string(),
             device: input_device.clone(),
-            config: input_stream_config.as_ref().map(|x| x.to_string()),
+            stream_cfg: input_stream_config.as_ref().map(|x| x.to_string()),
             udp_addr: udp_socket.local_addr()?.to_string(),
         };
 
@@ -90,7 +91,7 @@ impl Client {
                 NetworkMessage::SendAudioResponse {
                     actual_host: actual_remote_host,
                     actual_device: actual_remote_device,
-                    actual_config: actual_remote_config,
+                    actual_stream_cfg: actual_remote_config,
                 } => {
                     let input_device_cfg = DeviceConfig {
                         direction: DeviceDirection::Input,
@@ -135,13 +136,13 @@ impl Client {
     ) -> anyhow::Result<()> {
         let (input_device, input_device_cfg, buffer_frames) =
             AudioCaps::get_input_device(input_host, input_device, input_config)?;
-        let socket = TcpStream::connect(sock_addr).await?;
+        let stream = TcpStream::connect(sock_addr).await?;
         let udp_socket = UdpSocket::bind("0.0.0.0:0").await?;
-        let mut framed = Framed::new(socket, LengthDelimitedCodec::new());
+        let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
         let message = NetworkMessage::ReceiveAudio {
             host: output_host.to_string(),
             device: output_device.clone(),
-            config: output_config.as_ref().map(|x| x.to_string()),
+            stream_cfg: output_config.as_ref().map(|x| x.to_string()),
         };
 
         framed.send(to_vec(&message)?.into()).await?;
@@ -157,7 +158,7 @@ impl Client {
                 NetworkMessage::ReceiveAudioResponse {
                     actual_host: actual_remote_host,
                     actual_device: actual_remote_device,
-                    actual_config: actual_remote_config,
+                    actual_stream_cfg: actual_remote_config,
                     udp_addr,
                 } => {
                     let output_device_cfg = DeviceConfig {
@@ -187,7 +188,10 @@ impl Client {
                     )
                     .await?;
                 }
-                _ => bail!("Unexpected response from remote"),
+                _ => {
+                    error!("Unexpected response from remote");
+                    framed.get_mut().shutdown().await?;
+                }
             }
         }
 

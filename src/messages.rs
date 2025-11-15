@@ -10,26 +10,26 @@ pub enum NetworkMessage {
     SendAudio {
         host: String,
         device: Option<String>,
-        config: Option<String>,
+        stream_cfg: Option<String>,
         udp_addr: String,
     },
     /// Response to SendAudio message
     SendAudioResponse {
         actual_host: String,
         actual_device: String,
-        actual_config: String,
+        actual_stream_cfg: String,
     },
     /// Request server to receive audio from a remote computer and send to local output audio device
     ReceiveAudio {
         host: String,
         device: Option<String>,
-        config: Option<String>,
+        stream_cfg: Option<String>,
     },
     /// Response to ReceiveAudio message
     ReceiveAudioResponse {
         actual_host: String,
         actual_device: String,
-        actual_config: String,
+        actual_stream_cfg: String,
         udp_addr: String,
     },
 }

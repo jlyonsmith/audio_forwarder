@@ -3,7 +3,7 @@ use crate::{DeviceConfig, StreamConfig, SERVER_TIMEOUT};
 use anyhow::Context;
 use env_logger::Env;
 use futures::{future::join_all, SinkExt, StreamExt};
-use log::{error, info, LevelFilter};
+use log::{debug, error, info, LevelFilter};
 use rmp_serde::to_vec;
 use std::{
     net::SocketAddr,
@@ -76,7 +76,7 @@ impl Server {
             NetworkMessage::SendAudio {
                 host,
                 device,
-                config,
+                stream_cfg: config,
                 udp_addr,
             } => {
                 info!("Handling send audio remote message from {}", remote_addr);
@@ -113,7 +113,7 @@ impl Server {
                 let message = NetworkMessage::SendAudioResponse {
                     actual_host: host,
                     actual_device: input_device_cfg.device_name.to_owned(),
-                    actual_config: input_device_cfg.stream_cfg.to_string(),
+                    actual_stream_cfg: input_device_cfg.stream_cfg.to_string(),
                 };
 
                 framed_stream.send(to_vec(&message)?.into()).await?;
@@ -146,6 +146,7 @@ impl Server {
                                 break;
                             }
                             Some(Ok(bytes)) = framed_stream.next() => {
+                                debug!("Received {} bytes on TCP connection", bytes.len());
                                 if bytes.len() == 0 {
                                     cancel_token_clone.cancel();
                                     break;
@@ -175,7 +176,7 @@ impl Server {
             NetworkMessage::ReceiveAudio {
                 host,
                 device,
-                config,
+                stream_cfg: config,
             } => {
                 info!("Handling receive audio from remote message");
 
@@ -202,20 +203,12 @@ impl Server {
                 let local_udp_socket = UdpSocket::bind("0.0.0.0:0")
                     .await
                     .context("Failed to bind UDP socket")?;
+                let udp_addr = local_udp_socket.local_addr()?;
 
                 info!(
                     "Receiving audio on udp://{} and sending to local output device {}",
-                    local_udp_socket.local_addr()?,
-                    output_device_cfg,
+                    udp_addr, output_device_cfg,
                 );
-
-                let message = NetworkMessage::SendAudioResponse {
-                    actual_host: host,
-                    actual_device: output_device_cfg.device_name.to_owned(),
-                    actual_config: output_device_cfg.stream_cfg.to_string(),
-                };
-
-                framed_stream.send(to_vec(&message)?.into()).await?;
 
                 let cancel_token = CancellationToken::new();
                 let cancel_token_clone = cancel_token.clone();
@@ -245,6 +238,7 @@ impl Server {
                                 break;
                             }
                             Some(Ok(bytes)) = framed_stream.next() => {
+                                debug!("Received {} bytes on TCP connection", bytes.len());
                                 if bytes.len() == 0 {
                                     cancel_token_clone.cancel();
                                     break;
@@ -260,7 +254,7 @@ impl Server {
                     let mut locked_map = self.handle_map.lock().unwrap();
 
                     locked_map.insert(
-                        output_device_cfg,
+                        output_device_cfg.clone(),
                         ConnectionInfo {
                             cancel_token,
                             udp_task_handle,
@@ -268,6 +262,15 @@ impl Server {
                         },
                     );
                 }
+
+                let message = NetworkMessage::ReceiveAudioResponse {
+                    actual_host: host,
+                    actual_device: output_device_cfg.device_name.to_owned(),
+                    actual_stream_cfg: output_device_cfg.stream_cfg.to_string(),
+                    udp_addr: udp_addr.to_string(),
+                };
+
+                framed_stream.send(to_vec(&message)?.into()).await?;
 
                 return Ok(());
             }
@@ -296,7 +299,6 @@ impl Server {
                     }
                 }
                 _ = signal::ctrl_c() => {
-                    info!("Stopping server");
                     break;
                 }
             }
@@ -316,6 +318,8 @@ impl Server {
         }
 
         join_all(handles.into_iter()).await;
+
+        info!("Server stopped");
 
         Ok(())
     }
