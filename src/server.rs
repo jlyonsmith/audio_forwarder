@@ -2,7 +2,7 @@ pub use crate::{audio_caps::AudioCaps, messages::NetworkMessage, udp_server::Udp
 use crate::{DeviceConfig, StreamConfig, SERVER_TIMEOUT};
 use anyhow::Context;
 use env_logger::Env;
-use futures::{SinkExt, StreamExt};
+use futures::{future::join_all, SinkExt, StreamExt};
 use log::{error, info, LevelFilter};
 use rmp_serde::to_vec;
 use std::{
@@ -22,9 +22,14 @@ use tokio_util::{
     sync::CancellationToken,
 };
 
+struct ConnectionInfo {
+    cancel_token: CancellationToken,
+    udp_task_handle: JoinHandle<()>,
+    socket_task_handle: JoinHandle<()>,
+}
+
 pub struct Server {
-    handle_map:
-        Arc<Mutex<std::collections::HashMap<DeviceConfig, (CancellationToken, JoinHandle<()>)>>>,
+    handle_map: Arc<Mutex<std::collections::HashMap<DeviceConfig, ConnectionInfo>>>,
 }
 
 impl Server {
@@ -36,12 +41,15 @@ impl Server {
         }
     }
 
-    async fn handle_connection(&self, socket: &mut TcpStream) -> anyhow::Result<()> {
-        let remote_addr = socket.peer_addr()?;
-        let mut framed = Framed::new(&mut *socket, LengthDelimitedCodec::new());
+    async fn handle_connection(
+        &self,
+        stream: TcpStream,
+        remote_addr: SocketAddr,
+    ) -> anyhow::Result<()> {
+        let mut framed_stream = Framed::new(stream, LengthDelimitedCodec::new());
 
         // Process just one message from the stream
-        let frame = match timeout(SERVER_TIMEOUT, framed.next()).await? {
+        let frame = match timeout(SERVER_TIMEOUT, framed_stream.next()).await? {
             Some(result) => result?,
             None => {
                 return Err(anyhow::anyhow!(
@@ -61,7 +69,7 @@ impl Server {
                 let output = AudioCaps::get_device_list_string().unwrap();
                 let list_remote_response_message = NetworkMessage::ListResponse { output };
 
-                framed
+                framed_stream
                     .send(to_vec(&list_remote_response_message).unwrap().into())
                     .await?;
             }
@@ -82,13 +90,13 @@ impl Server {
                 {
                     let mut locked_map = self.handle_map.lock().unwrap();
 
-                    if let Some((cancel_token, handle)) = locked_map.remove(&input_device_cfg) {
+                    if let Some(info) = locked_map.remove(&input_device_cfg) {
                         info!(
                             "Stopping existing stream for input device {}",
                             &input_device_cfg
                         );
-                        cancel_token.cancel();
-                        handle.await.ok();
+                        info.cancel_token.cancel();
+                        join_all([info.udp_task_handle, info.socket_task_handle]).await;
                     }
                 }
 
@@ -108,12 +116,12 @@ impl Server {
                     actual_config: input_device_cfg.stream_cfg.to_string(),
                 };
 
-                framed.send(to_vec(&message)?.into()).await?;
+                framed_stream.send(to_vec(&message)?.into()).await?;
 
                 let cancel_token = CancellationToken::new();
                 let cancel_token_clone = cancel_token.clone();
                 let input_device_cfg_clone = input_device_cfg.clone();
-                let handle = tokio::task::spawn_blocking(move || {
+                let udp_task_handle = tokio::task::spawn_blocking(move || {
                     // cpal::Stream is !Send so we must use a dedicated thread for the UdpServer
                     let rt = Runtime::new().unwrap();
                     rt.block_on(async {
@@ -130,10 +138,36 @@ impl Server {
                     });
                 });
 
+                let cancel_token_clone = cancel_token.clone();
+                let socket_task_handle = tokio::spawn(async move {
+                    loop {
+                        select! {
+                            _ = cancel_token_clone.cancelled() => {
+                                break;
+                            }
+                            Some(Ok(bytes)) = framed_stream.next() => {
+                                if bytes.len() == 0 {
+                                    cancel_token_clone.cancel();
+                                    break;
+                                }
+                            }
+                        }
+
+                        info!("Close TCP connection to {}", remote_addr);
+                    }
+                });
+
                 {
                     let mut locked_map = self.handle_map.lock().unwrap();
 
-                    locked_map.insert(input_device_cfg, (cancel_token, handle));
+                    locked_map.insert(
+                        input_device_cfg,
+                        ConnectionInfo {
+                            cancel_token,
+                            udp_task_handle,
+                            socket_task_handle,
+                        },
+                    );
                 }
 
                 return Ok(());
@@ -155,13 +189,13 @@ impl Server {
                 {
                     let mut locked_map = self.handle_map.lock().unwrap();
 
-                    if let Some((cancel_token, handle)) = locked_map.remove(&output_device_cfg) {
+                    if let Some(info) = locked_map.remove(&output_device_cfg) {
                         info!(
                             "Stopping existing stream for output device {}",
                             &output_device_cfg
                         );
-                        cancel_token.cancel();
-                        handle.await.ok();
+                        info.cancel_token.cancel();
+                        join_all([info.udp_task_handle, info.socket_task_handle]).await;
                     }
                 }
 
@@ -181,12 +215,12 @@ impl Server {
                     actual_config: output_device_cfg.stream_cfg.to_string(),
                 };
 
-                framed.send(to_vec(&message)?.into()).await?;
+                framed_stream.send(to_vec(&message)?.into()).await?;
 
                 let cancel_token = CancellationToken::new();
                 let cancel_token_clone = cancel_token.clone();
                 let output_device_cfg_clone = output_device_cfg.clone();
-                let handle = tokio::task::spawn_blocking(move || {
+                let udp_task_handle = tokio::task::spawn_blocking(move || {
                     // cpal::Stream is !Send so we must use a dedicated thread for the UdpServer
                     let rt = Runtime::new().unwrap();
                     rt.block_on(async {
@@ -202,10 +236,37 @@ impl Server {
                     });
                 });
 
+                let cancel_token_clone = cancel_token.clone();
+                let socket_task_handle = tokio::spawn(async move {
+                    // Keep the TCP connection alive until cancelled
+                    loop {
+                        select! {
+                            _ = cancel_token_clone.cancelled() => {
+                                break;
+                            }
+                            Some(Ok(bytes)) = framed_stream.next() => {
+                                if bytes.len() == 0 {
+                                    cancel_token_clone.cancel();
+                                    break;
+                                }
+                            }
+                        }
+
+                        info!("Close TCP connection to {}", remote_addr);
+                    }
+                });
+
                 {
                     let mut locked_map = self.handle_map.lock().unwrap();
 
-                    locked_map.insert(output_device_cfg, (cancel_token, handle));
+                    locked_map.insert(
+                        output_device_cfg,
+                        ConnectionInfo {
+                            cancel_token,
+                            udp_task_handle,
+                            socket_task_handle,
+                        },
+                    );
                 }
 
                 return Ok(());
@@ -226,10 +287,10 @@ impl Server {
 
         loop {
             select! {
-                Ok((mut socket, addr)) = listener.accept() => {
+                Ok((stream, addr)) = listener.accept() => {
                     info!("Accepted connection from {}", addr);
 
-                    match self.handle_connection(&mut socket).await {
+                    match self.handle_connection(stream, addr).await {
                         Ok(_) => {}
                         Err(e) => error!("Error handling connection - {}", e),
                     }
@@ -240,6 +301,21 @@ impl Server {
                 }
             }
         }
+
+        let mut handles = Vec::new();
+
+        {
+            let mut locked_map = self.handle_map.lock().unwrap();
+
+            for (device_cfg, info) in locked_map.drain() {
+                info!("Stopping stream for device {}", &device_cfg);
+                info.cancel_token.cancel();
+                handles.push(info.udp_task_handle);
+                handles.push(info.socket_task_handle);
+            }
+        }
+
+        join_all(handles.into_iter()).await;
 
         Ok(())
     }
