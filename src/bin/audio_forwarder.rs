@@ -11,7 +11,7 @@ struct AudioForwarderArgs {
     command: Commands,
 
     /// Set the logging level (e.g., info, debug, trace)
-    #[arg(long, default_value_t = LevelFilter::Info)]
+    #[arg(long = "log-level", default_value_t = LevelFilter::Info)]
     log_level: LevelFilter,
 }
 
@@ -40,7 +40,7 @@ pub struct ReceiveArgs {
     pub local_device: Option<String>,
 
     /// The local audio device stream configuration in the format "<channels>x<sample_rate>" to send audio to
-    #[arg(long = "local-config", value_parser = StreamConfig::from_str)]
+    #[arg(long = "local-stream-cfg", value_parser = StreamConfig::from_str)]
     pub local_config: Option<StreamConfig>,
 
     /// The name of the audio host to receive audio from on the remote computer
@@ -52,7 +52,7 @@ pub struct ReceiveArgs {
     remote_device: Option<String>,
 
     /// The audio device stream configuration in the format "<channels>x<sample_rate>" to receive audio from on the remote computer
-    #[arg(long = "remote-config", value_parser = StreamConfig::from_str)]
+    #[arg(long = "remote-stream-cfg", value_parser = StreamConfig::from_str)]
     remote_config: Option<StreamConfig>,
 
     /// The IP address and port of a remote computer to receive audio from
@@ -71,7 +71,7 @@ struct SendArgs {
     local_device: Option<String>,
 
     /// The audio device stream configuration in the format "<channels>x<sample_rate>" to receive audio from
-    #[arg(long = "local-config", value_parser = StreamConfig::from_str)]
+    #[arg(long = "local-stream-cfg", value_parser = StreamConfig::from_str)]
     local_config: Option<StreamConfig>,
 
     /// The name of the audio host to send audio to on the remote computer
@@ -83,7 +83,7 @@ struct SendArgs {
     remote_device: Option<String>,
 
     /// The audio device stream configuration in the format "<channels>x<sample_rate>" to send audio to on the remote computer
-    #[arg(long = "remote-config", value_parser = StreamConfig::from_str)]
+    #[arg(long = "remote-stream-cfg", value_parser = StreamConfig::from_str)]
     remote_config: Option<StreamConfig>,
 
     /// The IP address and port of a remote computer to send audio to
