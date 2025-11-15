@@ -1,28 +1,32 @@
+use crate::device_config::{DeviceConfig, DeviceDirection};
 pub use crate::stream_config::StreamConfig;
 use anyhow::{anyhow, Context};
 use cpal::{
     traits::{DeviceTrait, HostTrait},
-    Device, SampleRate, SupportedStreamConfig, SupportedStreamConfigRange,
+    Device, SampleRate, SupportedBufferSize, SupportedStreamConfig, SupportedStreamConfigRange,
 };
 use std::fmt::Write;
 
 pub struct AudioCaps {}
 
 impl AudioCaps {
-    pub fn get_output_device_config(
-        host: &str,
-        device: &Option<String>,
-        stream_config: &Option<StreamConfig>,
-    ) -> Result<(Device, SupportedStreamConfig), anyhow::Error> {
+    pub fn get_output_device(
+        host_name: &str,
+        device_name: &Option<String>,
+        stream_cfg: &Option<StreamConfig>,
+    ) -> Result<(Device, DeviceConfig, u32), anyhow::Error> {
         let available_hosts = cpal::available_hosts();
         let host_id = available_hosts
             .iter()
-            .find(|item| host == item.name())
-            .ok_or(anyhow!("There is no audio host with name \"{}\"", host))?;
+            .find(|item| host_name == item.name())
+            .ok_or(anyhow!(
+                "There is no audio host with name \"{}\"",
+                host_name
+            ))?;
 
         let host = cpal::host_from_id(*host_id)?;
 
-        let device = if let Some(device) = device {
+        let device = if let Some(device) = device_name {
             host.devices()
                 .context("Failed to get list of audio devices")?
                 .into_iter()
@@ -36,33 +40,49 @@ impl AudioCaps {
                 .ok_or(anyhow!("Failed to get a default output device"))?
         };
 
-        let config = if let Some(stream_config) = stream_config {
+        let config = if let Some(stream_cfg) = stream_cfg {
             device
                 .supported_output_configs()
                 .context("Failed to get supported output configs")?
                 .into_iter()
                 .find(|config: &SupportedStreamConfigRange| {
-                    stream_config.sample_rate >= config.min_sample_rate().0
-                        && stream_config.sample_rate <= config.max_sample_rate().0
-                        && stream_config.channels == config.channels()
-                        && stream_config.sample_format == config.sample_format()
+                    stream_cfg.sample_rate >= config.min_sample_rate().0
+                        && stream_cfg.sample_rate <= config.max_sample_rate().0
+                        && stream_cfg.channels == config.channels()
+                        && stream_cfg.sample_format == config.sample_format()
                 })
                 .ok_or(anyhow!("Failed to find a supported output config"))?
-                .with_sample_rate(SampleRate(stream_config.sample_rate))
+                .with_sample_rate(SampleRate(stream_cfg.sample_rate))
         } else {
             device
                 .default_output_config()
                 .context("Failed to get a default output config")?
         };
 
-        Ok((device, config))
+        Ok((
+            device.clone(),
+            DeviceConfig {
+                direction: DeviceDirection::Output,
+                host_name: host_id.name().to_string(),
+                device_name: device.name()?,
+                stream_cfg: StreamConfig {
+                    channels: config.channels(),
+                    sample_rate: config.sample_rate().0,
+                    sample_format: config.sample_format(),
+                },
+            },
+            match *config.buffer_size() {
+                SupportedBufferSize::Range { min, max: _ } => min,
+                SupportedBufferSize::Unknown => 1,
+            },
+        ))
     }
 
-    pub fn get_input_device_config(
+    pub fn get_input_device(
         host: &str,
         device: &Option<String>,
-        stream_config: &Option<StreamConfig>,
-    ) -> Result<(Device, SupportedStreamConfig), anyhow::Error> {
+        stream_cfg: &Option<StreamConfig>,
+    ) -> Result<(Device, DeviceConfig, u32), anyhow::Error> {
         let available_hosts = cpal::available_hosts();
         let host_id = available_hosts
             .iter()
@@ -85,29 +105,45 @@ impl AudioCaps {
                 .ok_or(anyhow!("Failed to get a default input device"))?
         };
 
-        let config = if let Some(sample_config) = stream_config {
+        let config = if let Some(stream_cfg) = stream_cfg {
             device
                 .supported_input_configs()
                 .context("Failed to get supported input configs")?
                 .into_iter()
                 .find(|config: &SupportedStreamConfigRange| {
-                    sample_config.sample_rate >= config.min_sample_rate().0
-                        && sample_config.sample_rate <= config.max_sample_rate().0
-                        && sample_config.channels == config.channels()
-                        && sample_config.sample_format == config.sample_format()
+                    stream_cfg.sample_rate >= config.min_sample_rate().0
+                        && stream_cfg.sample_rate <= config.max_sample_rate().0
+                        && stream_cfg.channels == config.channels()
+                        && stream_cfg.sample_format == config.sample_format()
                 })
                 .ok_or(anyhow!("Failed to find a supported input config"))?
-                .with_sample_rate(SampleRate(sample_config.sample_rate))
+                .with_sample_rate(SampleRate(stream_cfg.sample_rate))
         } else {
             device
                 .default_input_config()
                 .context("Failed to get a default input config")?
         };
 
-        Ok((device, config))
+        Ok((
+            device.clone(),
+            DeviceConfig {
+                direction: DeviceDirection::Input,
+                host_name: host_id.name().to_string(),
+                device_name: device.name()?,
+                stream_cfg: StreamConfig {
+                    channels: config.channels(),
+                    sample_rate: config.sample_rate().0,
+                    sample_format: config.sample_format(),
+                },
+            },
+            match *config.buffer_size() {
+                SupportedBufferSize::Range { min, max: _ } => min,
+                SupportedBufferSize::Unknown => 1,
+            },
+        ))
     }
 
-    pub fn list_to_string() -> anyhow::Result<String> {
+    pub fn get_device_list_string() -> anyhow::Result<String> {
         fn format_config(
             config: &SupportedStreamConfigRange,
             default_config: &Option<SupportedStreamConfig>,

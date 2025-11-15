@@ -1,8 +1,8 @@
+use crate::StreamConfig;
 use anyhow::bail;
 use cpal::{
     traits::{DeviceTrait, StreamTrait},
     Device, FromSample, InputCallbackInfo, OutputCallbackInfo, Sample, SampleFormat, SizedSample,
-    SupportedStreamConfig,
 };
 use dasp_sample::ToSample;
 use log::{debug, error, info, warn};
@@ -12,6 +12,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tokio::{net::UdpSocket, select, signal, sync::Notify};
+use tokio_util::sync::CancellationToken;
 
 pub struct UdpServer {}
 
@@ -20,17 +21,43 @@ impl UdpServer {
         socket: UdpSocket,
         sock_addr: SocketAddr,
         device: Device,
-        config: SupportedStreamConfig,
+        stream_config: StreamConfig,
+        buffer_frames: u32,
+        cancel_token: CancellationToken,
     ) -> Result<(), anyhow::Error> {
-        match config.sample_format() {
+        match stream_config.sample_format {
             SampleFormat::F32 => {
-                Self::gen_send_audio::<f32>(&socket, &sock_addr, &device, &config).await
+                Self::gen_send_audio::<f32>(
+                    &socket,
+                    &sock_addr,
+                    &device,
+                    &stream_config,
+                    buffer_frames,
+                    cancel_token,
+                )
+                .await
             }
             SampleFormat::I16 => {
-                Self::gen_send_audio::<i16>(&socket, &sock_addr, &device, &config).await
+                Self::gen_send_audio::<i16>(
+                    &socket,
+                    &sock_addr,
+                    &device,
+                    &stream_config,
+                    buffer_frames,
+                    cancel_token,
+                )
+                .await
             }
             SampleFormat::U16 => {
-                Self::gen_send_audio::<u16>(&socket, &sock_addr, &device, &config).await
+                Self::gen_send_audio::<u16>(
+                    &socket,
+                    &sock_addr,
+                    &device,
+                    &stream_config,
+                    buffer_frames,
+                    cancel_token,
+                )
+                .await
             }
             _ => bail!("Unsupported sample format on input device"),
         }
@@ -40,14 +67,13 @@ impl UdpServer {
         socket: &UdpSocket,
         sock_addr: &SocketAddr,
         device: &Device,
-        config: &SupportedStreamConfig,
+        stream_config: &StreamConfig,
+        buffer_frames: u32,
+        cancel_token: CancellationToken,
     ) -> Result<(), anyhow::Error>
     where
         T: SizedSample + Sample + ToSample<f32>,
     {
-        let supported_config = config.config();
-        let channels = config.channels() as usize;
-        // TODO @john: Pass this in
         let mut sequence_number = 0u64;
         let notify = Arc::new(Notify::new());
         let notify_clone = notify.clone();
@@ -55,7 +81,11 @@ impl UdpServer {
         let audio_buffer = Arc::new(Mutex::new(VecDeque::with_capacity(1024 * 16)));
         let audio_buffer_clone = audio_buffer.clone();
         let stream = device.build_input_stream(
-            &supported_config,
+            &cpal::StreamConfig {
+                channels: stream_config.channels,
+                sample_rate: cpal::SampleRate(stream_config.sample_rate),
+                buffer_size: cpal::BufferSize::Fixed(buffer_frames),
+            },
             move |input: &[T], _: &InputCallbackInfo| {
                 let mut audio_buffer = audio_buffer_clone.lock().unwrap();
                 let mut audio_buffer_shrunk = false;
@@ -88,6 +118,10 @@ impl UdpServer {
         // It is expected that this loop will never exit, and will be called in the
         // context of a tokio task which can be aborted.
         loop {
+            if cancel_token.is_cancelled() {
+                break;
+            }
+
             // Wait for the audio buffer to be ready
             notify.notified().await;
 
@@ -113,7 +147,7 @@ impl UdpServer {
                         packet_buffer.extend_from_slice(sample_slice);
 
                         // Duplicate the sample for mono input channels
-                        if channels == 1 {
+                        if stream_config.channels == 1 {
                             packet_buffer.extend_from_slice(sample_slice);
                         }
                     }
@@ -131,17 +165,49 @@ impl UdpServer {
                 }
             }
         }
+
+        debug!("Stopped UDP audio sender");
+        return Ok(());
     }
 
     pub async fn receive_audio(
         socket: UdpSocket,
         device: Device,
-        config: SupportedStreamConfig,
+        stream_config: StreamConfig,
+        buffer_frames: u32,
+        cancel_token: CancellationToken,
     ) -> anyhow::Result<()> {
-        match config.sample_format() {
-            SampleFormat::F32 => Self::gen_receive_audio::<f32>(&socket, &device, &config).await,
-            SampleFormat::I16 => Self::gen_receive_audio::<i16>(&socket, &device, &config).await,
-            SampleFormat::U16 => Self::gen_receive_audio::<u16>(&socket, &device, &config).await,
+        match stream_config.sample_format {
+            SampleFormat::F32 => {
+                Self::gen_receive_audio::<f32>(
+                    &socket,
+                    &device,
+                    &stream_config,
+                    buffer_frames,
+                    cancel_token,
+                )
+                .await
+            }
+            SampleFormat::I16 => {
+                Self::gen_receive_audio::<i16>(
+                    &socket,
+                    &device,
+                    &stream_config,
+                    buffer_frames,
+                    cancel_token,
+                )
+                .await
+            }
+            SampleFormat::U16 => {
+                Self::gen_receive_audio::<u16>(
+                    &socket,
+                    &device,
+                    &stream_config,
+                    buffer_frames,
+                    cancel_token,
+                )
+                .await
+            }
             _ => bail!("Unsupported sample format on output device"),
         }
     }
@@ -149,17 +215,22 @@ impl UdpServer {
     pub async fn gen_receive_audio<T>(
         socket: &UdpSocket,
         device: &Device,
-        config: &SupportedStreamConfig,
+        stream_config: &StreamConfig,
+        buffer_frames: u32,
+        cancel_token: CancellationToken,
     ) -> anyhow::Result<()>
     where
         T: SizedSample + FromSample<f32>,
     {
-        let config = config.config();
         let mut packet_buffer = vec![0u8; crate::MTU];
         let audio_buffer = Arc::new(Mutex::new(VecDeque::with_capacity(1024 * 16)));
         let audio_buffer_clone = audio_buffer.clone();
         let stream = device.build_output_stream(
-            &config,
+            &cpal::StreamConfig {
+                channels: stream_config.channels,
+                sample_rate: cpal::SampleRate(stream_config.sample_rate),
+                buffer_size: cpal::BufferSize::Fixed(buffer_frames),
+            },
             move |output: &mut [T], _: &OutputCallbackInfo| {
                 let mut audio_buffer = audio_buffer_clone.lock().unwrap();
 
@@ -191,6 +262,10 @@ impl UdpServer {
         let mut packet_length = 0;
 
         loop {
+            if cancel_token.is_cancelled() {
+                break;
+            }
+
             select! {
                 socket_result = socket.recv_from(&mut packet_buffer) => {
                     match socket_result {
@@ -263,6 +338,7 @@ impl UdpServer {
             }
         }
 
+        debug!("Stopped UDP audio receiver");
         Ok(())
     }
 }

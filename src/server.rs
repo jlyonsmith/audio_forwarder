@@ -1,144 +1,217 @@
-use crate::StreamConfig;
 pub use crate::{audio_caps::AudioCaps, messages::NetworkMessage, udp_server::UdpServer};
+use crate::{DeviceConfig, StreamConfig, SERVER_TIMEOUT};
 use anyhow::Context;
-use cpal::traits::DeviceTrait;
 use env_logger::Env;
 use futures::{SinkExt, StreamExt};
 use log::{error, info, LevelFilter};
 use rmp_serde::to_vec;
-use std::{net::SocketAddr, str::FromStr};
+use std::{
+    net::SocketAddr,
+    str::FromStr,
+    sync::{Arc, Mutex},
+};
 use tokio::{
     net::{TcpListener, TcpStream, UdpSocket},
     runtime::Runtime,
     select, signal,
+    task::JoinHandle,
+    time::timeout,
 };
-use tokio_util::codec::{Framed, LengthDelimitedCodec};
+use tokio_util::{
+    codec::{Framed, LengthDelimitedCodec},
+    sync::CancellationToken,
+};
 
-pub struct Server {}
+pub struct Server {
+    handle_map:
+        Arc<Mutex<std::collections::HashMap<DeviceConfig, (CancellationToken, JoinHandle<()>)>>>,
+}
 
 impl Server {
     pub fn new(log_level: LevelFilter) -> Server {
         env_logger::Builder::from_env(Env::default().filter_or("RUST_LOG", log_level.to_string()))
             .init();
-        Server {}
+        Server {
+            handle_map: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        }
     }
 
     async fn handle_connection(&self, socket: &mut TcpStream) -> anyhow::Result<()> {
         let remote_addr = socket.peer_addr()?;
         let mut framed = Framed::new(&mut *socket, LengthDelimitedCodec::new());
 
-        // TODO @john: Process just one message from the stream
-        while let Some(result) = framed.next().await {
-            let frame = result?;
+        // Process just one message from the stream
+        let frame = match timeout(SERVER_TIMEOUT, framed.next()).await? {
+            Some(result) => result?,
+            None => {
+                return Err(anyhow::anyhow!(
+                    "Timeout waiting for message from {}",
+                    remote_addr
+                ));
+            }
+        };
 
-            // Deserialize the received bytes
-            let message = rmp_serde::from_slice::<NetworkMessage>(&frame)?;
+        // Deserialize the received bytes
+        let message = rmp_serde::from_slice::<NetworkMessage>(&frame)?;
 
-            // Match on the deserialized enum
-            match message {
-                NetworkMessage::List => {
-                    info!("Handling list remote message from {}", remote_addr);
-                    let output = AudioCaps::list_to_string().unwrap();
-                    let list_remote_response_message = NetworkMessage::ListResponse { output };
+        // Match on the deserialized enum
+        match message {
+            NetworkMessage::List => {
+                info!("Handling list remote message from {}", remote_addr);
+                let output = AudioCaps::get_device_list_string().unwrap();
+                let list_remote_response_message = NetworkMessage::ListResponse { output };
 
-                    framed
-                        .send(to_vec(&list_remote_response_message).unwrap().into())
-                        .await?;
+                framed
+                    .send(to_vec(&list_remote_response_message).unwrap().into())
+                    .await?;
+            }
+            NetworkMessage::SendAudio {
+                host,
+                device,
+                config,
+                udp_addr,
+            } => {
+                info!("Handling send audio remote message from {}", remote_addr);
+
+                let (input_device, input_device_cfg, buffer_frames) = AudioCaps::get_input_device(
+                    &host,
+                    &device,
+                    &config.and_then(|s| StreamConfig::from_str(&s).ok()),
+                )?;
+
+                {
+                    let mut locked_map = self.handle_map.lock().unwrap();
+
+                    if let Some((cancel_token, handle)) = locked_map.remove(&input_device_cfg) {
+                        info!(
+                            "Stopping existing stream for input device {}",
+                            &input_device_cfg
+                        );
+                        cancel_token.cancel();
+                        handle.await.ok();
+                    }
                 }
-                NetworkMessage::SendAudio {
-                    host,
-                    device,
-                    config,
-                    udp_addr,
-                } => {
-                    info!("Handling send audio remote message from {}", remote_addr);
 
-                    let stream_config = config.and_then(|s| StreamConfig::from_str(&s).ok());
-                    let (actual_device, actual_config) =
-                        AudioCaps::get_input_device_config(&host, &device, &stream_config)?;
-                    let local_udp_socket = UdpSocket::bind("0.0.0.0:0")
+                let local_udp_socket = UdpSocket::bind("0.0.0.0:0")
+                    .await
+                    .context("Failed to bind UDP socket")?;
+                let remote_udp_addr = SocketAddr::from_str(&udp_addr)?;
+
+                info!(
+                    "Receiving local input audio device {} and sending to udp://{}",
+                    &input_device_cfg.host_name, remote_udp_addr
+                );
+
+                let message = NetworkMessage::SendAudioResponse {
+                    actual_host: host,
+                    actual_device: input_device_cfg.device_name.to_owned(),
+                    actual_config: input_device_cfg.stream_cfg.to_string(),
+                };
+
+                framed.send(to_vec(&message)?.into()).await?;
+
+                let cancel_token = CancellationToken::new();
+                let cancel_token_clone = cancel_token.clone();
+                let input_device_cfg_clone = input_device_cfg.clone();
+                let handle = tokio::task::spawn_blocking(move || {
+                    // cpal::Stream is !Send so we must use a dedicated thread for the UdpServer
+                    let rt = Runtime::new().unwrap();
+                    rt.block_on(async {
+                        UdpServer::send_audio(
+                            local_udp_socket,
+                            remote_udp_addr,
+                            input_device,
+                            input_device_cfg_clone.stream_cfg,
+                            buffer_frames,
+                            cancel_token_clone,
+                        )
                         .await
-                        .context("Failed to bind UDP socket")?;
-                    let remote_udp_addr = SocketAddr::from_str(&udp_addr)?;
-
-                    info!(
-                        "Receiving local input audio device {} -> {} -> {} and sending to udp://{}",
-                        host,
-                        actual_device.name().unwrap(),
-                        StreamConfig::to_config_string(&actual_config),
-                        remote_udp_addr
-                    );
-
-                    let message = NetworkMessage::SendAudioResponse {
-                        actual_host: host,
-                        actual_device: actual_device.name().unwrap(),
-                        actual_config: StreamConfig::to_config_string(&actual_config),
-                    };
-
-                    framed.send(to_vec(&message)?.into()).await?;
-
-                    let _handle = std::thread::spawn(move || {
-                        // cpal::Stream is !Send so we must use a dedicated thread for the UdpServer
-                        let rt = Runtime::new().unwrap();
-                        rt.block_on(async {
-                            UdpServer::send_audio(
-                                local_udp_socket,
-                                remote_udp_addr,
-                                actual_device,
-                                actual_config,
-                            )
-                            .await
-                            .ok();
-                        });
+                        .ok();
                     });
-                }
-                NetworkMessage::ReceiveAudio {
-                    host,
-                    device,
-                    config,
-                } => {
-                    info!("Handling receive audio from remote message");
+                });
 
-                    let config = config.and_then(|s| StreamConfig::from_str(&s).ok());
-                    let (actual_device, actual_config) =
-                        AudioCaps::get_output_device_config(&host, &device, &config)?;
-                    let local_udp_socket = UdpSocket::bind("0.0.0.0:0")
+                {
+                    let mut locked_map = self.handle_map.lock().unwrap();
+
+                    locked_map.insert(input_device_cfg, (cancel_token, handle));
+                }
+
+                return Ok(());
+            }
+            NetworkMessage::ReceiveAudio {
+                host,
+                device,
+                config,
+            } => {
+                info!("Handling receive audio from remote message");
+
+                let (output_device, output_device_cfg, buffer_frames) =
+                    AudioCaps::get_output_device(
+                        &host,
+                        &device,
+                        &config.and_then(|s| StreamConfig::from_str(&s).ok()),
+                    )?;
+
+                {
+                    let mut locked_map = self.handle_map.lock().unwrap();
+
+                    if let Some((cancel_token, handle)) = locked_map.remove(&output_device_cfg) {
+                        info!(
+                            "Stopping existing stream for output device {}",
+                            &output_device_cfg
+                        );
+                        cancel_token.cancel();
+                        handle.await.ok();
+                    }
+                }
+
+                let local_udp_socket = UdpSocket::bind("0.0.0.0:0")
+                    .await
+                    .context("Failed to bind UDP socket")?;
+
+                info!(
+                    "Receiving audio on udp://{} and sending to local output device {}",
+                    local_udp_socket.local_addr()?,
+                    output_device_cfg,
+                );
+
+                let message = NetworkMessage::SendAudioResponse {
+                    actual_host: host,
+                    actual_device: output_device_cfg.device_name.to_owned(),
+                    actual_config: output_device_cfg.stream_cfg.to_string(),
+                };
+
+                framed.send(to_vec(&message)?.into()).await?;
+
+                let cancel_token = CancellationToken::new();
+                let cancel_token_clone = cancel_token.clone();
+                let output_device_cfg_clone = output_device_cfg.clone();
+                let handle = tokio::task::spawn_blocking(move || {
+                    // cpal::Stream is !Send so we must use a dedicated thread for the UdpServer
+                    let rt = Runtime::new().unwrap();
+                    rt.block_on(async {
+                        UdpServer::receive_audio(
+                            local_udp_socket,
+                            output_device,
+                            output_device_cfg_clone.stream_cfg,
+                            buffer_frames,
+                            cancel_token_clone,
+                        )
                         .await
-                        .context("Failed to bind UDP socket")?;
-
-                    info!(
-                        "Receiving audio on udp://{} and sending to local output device {} -> {} -> {}",
-                        local_udp_socket.local_addr()?,
-                        host,
-                        actual_device.name().unwrap(),
-                        StreamConfig::to_config_string(&actual_config),
-                    );
-
-                    let message = NetworkMessage::SendAudioResponse {
-                        actual_host: host,
-                        actual_device: actual_device.name().unwrap(),
-                        actual_config: StreamConfig::to_config_string(&actual_config),
-                    };
-
-                    framed.send(to_vec(&message)?.into()).await?;
-
-                    let _handle = std::thread::spawn(move || {
-                        // cpal::Stream is !Send so we must use a dedicated thread for the UdpServer
-                        let rt = Runtime::new().unwrap();
-                        rt.block_on(async {
-                            UdpServer::receive_audio(
-                                local_udp_socket,
-                                actual_device,
-                                actual_config,
-                            )
-                            .await
-                            .ok();
-                        });
+                        .ok();
                     });
+                });
+
+                {
+                    let mut locked_map = self.handle_map.lock().unwrap();
+
+                    locked_map.insert(output_device_cfg, (cancel_token, handle));
                 }
-                _ => {
-                    error!("Unexpected message");
-                }
+
+                return Ok(());
+            }
+            _ => {
+                error!("Unexpected message");
             }
         }
 
@@ -155,13 +228,13 @@ impl Server {
             select! {
                 Ok((mut socket, addr)) = listener.accept() => {
                     info!("Accepted connection from {}", addr);
+
                     match self.handle_connection(&mut socket).await {
                         Ok(_) => {}
-                        Err(e) => error!("Error handling connection: {}", e),
+                        Err(e) => error!("Error handling connection - {}", e),
                     }
                 }
                 _ = signal::ctrl_c() => {
-                    // TODO @john: Create a signal that can be used to stop any running tasks
                     info!("Stopping server");
                     break;
                 }

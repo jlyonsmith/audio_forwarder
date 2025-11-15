@@ -1,9 +1,8 @@
 use crate::{
     audio_caps::AudioCaps, messages::NetworkMessage, stream_config::StreamConfig,
-    udp_server::UdpServer,
+    udp_server::UdpServer, DeviceConfig, DeviceDirection,
 };
 use anyhow::{bail, Context};
-use cpal::traits::DeviceTrait;
 use env_logger::Env;
 use futures::{SinkExt, StreamExt};
 use log::{info, LevelFilter};
@@ -13,9 +12,11 @@ use tokio::{
     net::{TcpStream, UdpSocket},
     time::timeout,
 };
-use tokio_util::codec::{Framed, LengthDelimitedCodec};
+use tokio_util::{
+    codec::{Framed, LengthDelimitedCodec},
+    sync::CancellationToken,
+};
 
-// TODO @john: Make this configurable
 pub struct Client {}
 
 impl Client {
@@ -26,7 +27,7 @@ impl Client {
     }
 
     pub fn list() -> anyhow::Result<()> {
-        println!("{}", AudioCaps::list_to_string()?);
+        println!("{}", AudioCaps::get_device_list_string()?);
         Ok(())
     }
 
@@ -62,8 +63,8 @@ impl Client {
         input_device: &Option<String>,
         input_stream_config: &Option<StreamConfig>,
     ) -> anyhow::Result<()> {
-        let (actual_output_device, actual_output_config) =
-            AudioCaps::get_output_device_config(output_host, output_device, output_stream_config)?;
+        let (output_device, output_device_cfg, buffer_frames) =
+            AudioCaps::get_output_device(output_host, output_device, output_stream_config)?;
         let socket = TcpStream::connect(sock_addr).await?;
         let udp_socket = UdpSocket::bind("0.0.0.0:0")
             .await
@@ -91,21 +92,27 @@ impl Client {
                     actual_device: actual_remote_device,
                     actual_config: actual_remote_config,
                 } => {
+                    let input_device_cfg = DeviceConfig {
+                        direction: DeviceDirection::Input,
+                        host_name: actual_remote_host,
+                        device_name: actual_remote_device,
+                        stream_cfg: actual_remote_config.parse()?,
+                    };
                     info!(
-                        "Capturing remote input audio from {} -> {} -> {}, receiving on udp://{} and forwarding to local output device {} -> {} -> {}",
-                        actual_remote_host,
-                        actual_remote_device,
-                        actual_remote_config,
+                        "Capturing remote input audio from {}, receiving on udp://{} and forwarding to local output device {}",
+                        input_device_cfg,
                         udp_socket.local_addr()?.to_string(),
-                        output_host,
-                        actual_output_device.name().unwrap_or("Unknown".to_string()),
-                        StreamConfig::to_config_string(&actual_output_config),
+                        output_device_cfg,
                     );
+
+                    let cancel_token = CancellationToken::new();
 
                     UdpServer::receive_audio(
                         udp_socket,
-                        actual_output_device,
-                        actual_output_config,
+                        output_device,
+                        output_device_cfg.stream_cfg,
+                        buffer_frames,
+                        cancel_token,
                     )
                     .await?;
                 }
@@ -126,8 +133,8 @@ impl Client {
         output_device: &Option<String>,
         output_config: &Option<StreamConfig>,
     ) -> anyhow::Result<()> {
-        let (actual_input_device, actual_input_config) =
-            AudioCaps::get_input_device_config(input_host, input_device, input_config)?;
+        let (input_device, input_device_cfg, buffer_frames) =
+            AudioCaps::get_input_device(input_host, input_device, input_config)?;
         let socket = TcpStream::connect(sock_addr).await?;
         let udp_socket = UdpSocket::bind("0.0.0.0:0").await?;
         let mut framed = Framed::new(socket, LengthDelimitedCodec::new());
@@ -153,25 +160,30 @@ impl Client {
                     actual_config: actual_remote_config,
                     udp_addr,
                 } => {
-                    let actual_remote_config: StreamConfig = actual_remote_config.parse()?;
+                    let output_device_cfg = DeviceConfig {
+                        direction: DeviceDirection::Output,
+                        host_name: actual_remote_host,
+                        device_name: actual_remote_device,
+                        stream_cfg: actual_remote_config.parse()?,
+                    };
                     let remote_udp_addr: SocketAddr = udp_addr.parse()?;
 
                     info!(
-                        "Capturing local input audio from {} -> {} -> {}, sending to udp://{} then forwarding to remote output audio {} -> {} -> {}",
-                        input_host,
-                        actual_input_device.name().unwrap(),
-                        StreamConfig::to_config_string(&actual_input_config),
+                        "Capturing local input device {}, sending via udp://{} to remote output device {}",
+                        input_device_cfg,
                         remote_udp_addr,
-                        actual_remote_host,
-                        actual_remote_device,
-                        actual_remote_config.to_string()
+                        output_device_cfg,
                     );
+
+                    let cancel_token = CancellationToken::new();
 
                     UdpServer::send_audio(
                         udp_socket,
                         remote_udp_addr,
-                        actual_input_device,
-                        actual_input_config,
+                        input_device,
+                        input_device_cfg.stream_cfg,
+                        buffer_frames,
+                        cancel_token,
                     )
                     .await?;
                 }
