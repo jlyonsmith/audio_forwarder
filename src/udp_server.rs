@@ -160,7 +160,10 @@ impl UdpServer {
                                 warn!("Partial packet sent");
                             }
                         }
-                        Err(e) => error!("Failed to send audio packet - {}", e),
+                        Err(e) => {
+                            // TODO(john): Don't log every error, maybe implement backoff with eventual hard failure
+                            error!("Failed to send audio packet to {} - {}", sock_addr, e);
+                        }
                     }
                 }
             }

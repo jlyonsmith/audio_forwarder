@@ -108,6 +108,8 @@ impl Client {
 
                     let cancel_token = CancellationToken::new();
 
+                    // TODO(john): Loop and graceful shutdown on Ctrl+C
+
                     UdpServer::receive_audio(
                         udp_socket,
                         output_device,
@@ -177,6 +179,8 @@ impl Client {
                     );
 
                     let cancel_token = CancellationToken::new();
+
+                    // TODO(john): Loop and graceful shutdown on Ctrl+C
 
                     UdpServer::send_audio(
                         udp_socket,

@@ -100,14 +100,14 @@ impl Server {
                     }
                 }
 
-                let local_udp_socket = UdpSocket::bind("0.0.0.0:0")
+                let local_udp_socket = UdpSocket::bind(SocketAddr::new(remote_addr.ip(), 0))
                     .await
                     .context("Failed to bind UDP socket")?;
                 let remote_udp_addr = SocketAddr::from_str(&udp_addr)?;
 
                 info!(
                     "Receiving local input audio device {} and sending to udp://{}",
-                    &input_device_cfg.host_name, remote_udp_addr
+                    &input_device_cfg.host_name, remote_udp_addr,
                 );
 
                 let message = NetworkMessage::SendAudioResponse {
