@@ -44,6 +44,7 @@ impl Server {
     async fn handle_connection(
         &self,
         stream: TcpStream,
+        local_addr: &SocketAddr,
         remote_addr: SocketAddr,
     ) -> anyhow::Result<()> {
         let mut framed_stream = Framed::new(stream, LengthDelimitedCodec::new());
@@ -100,7 +101,7 @@ impl Server {
                     }
                 }
 
-                let local_udp_socket = UdpSocket::bind(SocketAddr::new(remote_addr.ip(), 0))
+                let local_udp_socket = UdpSocket::bind(SocketAddr::new(local_addr.ip(), 0))
                     .await
                     .context("Failed to bind UDP socket")?;
                 let remote_udp_addr = SocketAddr::from_str(&send_udp_addr)?;
@@ -200,7 +201,7 @@ impl Server {
                     }
                 }
 
-                let local_udp_socket = UdpSocket::bind(SocketAddr::new(remote_addr.ip(), 0))
+                let local_udp_socket = UdpSocket::bind(SocketAddr::new(local_addr.ip(), 0))
                     .await
                     .context("Failed to bind UDP socket")?;
                 let local_udp_addr = local_udp_socket.local_addr()?;
@@ -282,18 +283,18 @@ impl Server {
         Ok(())
     }
 
-    pub async fn listen(&self, sock_addr: &SocketAddr) -> anyhow::Result<()> {
+    pub async fn listen(&self, local_addr: &SocketAddr) -> anyhow::Result<()> {
         // Bind the listener to an address
-        let listener = TcpListener::bind(sock_addr).await?;
+        let listener = TcpListener::bind(local_addr).await?;
 
-        info!("Server listening on {}", sock_addr);
+        info!("Server listening on {}", local_addr);
 
         loop {
             select! {
-                Ok((stream, addr)) = listener.accept() => {
-                    info!("Accepted connection from {}", addr);
+                Ok((stream, remote_addr)) = listener.accept() => {
+                    info!("Accepted connection from {}", remote_addr);
 
-                    match self.handle_connection(stream, addr).await {
+                    match self.handle_connection(stream, &local_addr, remote_addr).await {
                         Ok(_) => {}
                         Err(e) => error!("Error handling connection - {}", e),
                     }
