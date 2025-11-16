@@ -32,3 +32,18 @@ impl Display for DeviceConfig {
         )
     }
 }
+
+impl DeviceConfig {
+    pub fn device_id(&self) -> String {
+        format!(
+            "{}|{}|{}",
+            &self.host_name,
+            &self.device_name,
+            if &self.direction == &DeviceDirection::Input {
+                "Input"
+            } else {
+                "Output"
+            }
+        )
+    }
+}

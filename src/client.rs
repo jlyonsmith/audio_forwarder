@@ -1,6 +1,6 @@
 use crate::{
     audio_caps::AudioCaps, messages::NetworkMessage, stream_config::StreamConfig,
-    udp_server::UdpServer, DeviceConfig, DeviceDirection,
+    udp_server::UdpServer, DeviceConfig, DeviceDirection, SERVER_TIMEOUT,
 };
 use anyhow::{bail, Context};
 use env_logger::Env;
@@ -34,14 +34,16 @@ impl Client {
         Ok(())
     }
 
-    pub async fn list_remote(sock_addr: &SocketAddr) -> Result<(), anyhow::Error> {
-        let socket = TcpStream::connect(sock_addr).await?;
-        let mut framed = Framed::new(socket, LengthDelimitedCodec::new());
+    pub async fn list_remote(remote_addr: &SocketAddr) -> Result<(), anyhow::Error> {
+        let socket = TcpStream::connect(remote_addr).await?;
+        let mut framed_stream = Framed::new(socket, LengthDelimitedCodec::new());
         let list_remote_message = NetworkMessage::List;
 
-        framed.send(to_vec(&list_remote_message)?.into()).await?;
+        framed_stream
+            .send(to_vec(&list_remote_message)?.into())
+            .await?;
 
-        if let Some(result) = framed.next().await {
+        if let Some(result) = framed_stream.next().await {
             let frame = result?;
             let message = rmp_serde::from_slice::<NetworkMessage>(&frame)?;
 
@@ -58,7 +60,7 @@ impl Client {
 
     pub async fn receive(
         &self,
-        sock_addr: &SocketAddr,
+        remote_addr: &SocketAddr,
         output_host: &str,
         output_device: &Option<String>,
         output_stream_config: &Option<StreamConfig>,
@@ -68,11 +70,12 @@ impl Client {
     ) -> anyhow::Result<()> {
         let (output_device, output_device_cfg, buffer_frames) =
             AudioCaps::get_output_device(output_host, output_device, output_stream_config)?;
-        let socket = TcpStream::connect(sock_addr).await?;
+        let socket = TcpStream::connect(remote_addr).await?;
+        // TODO(john): Will need to give a specific IP address to bind too
         let udp_socket = UdpSocket::bind("0.0.0.0:0")
             .await
             .context("Failed to bind UDP socket")?;
-        let mut framed = Framed::new(socket, LengthDelimitedCodec::new());
+        let mut framed_stream = Framed::new(socket, LengthDelimitedCodec::new());
         let message = NetworkMessage::SendAudio {
             host: input_host.to_string(),
             device: input_device.clone(),
@@ -80,68 +83,75 @@ impl Client {
             udp_addr: udp_socket.local_addr()?.to_string(),
         };
 
-        framed.send(to_vec(&message)?.into()).await?;
+        info!("Actual local output device is {}", output_device_cfg);
 
-        if let Some(result) = timeout(crate::SERVER_TIMEOUT, framed.next())
-            .await
-            .context("Timed out waiting for response from server")?
-        {
-            let frame = result?;
-            let message = rmp_serde::from_slice::<NetworkMessage>(&frame)?;
+        framed_stream.send(to_vec(&message)?.into()).await?;
 
-            match message {
-                NetworkMessage::SendAudioResponse {
-                    actual_host: actual_remote_host,
-                    actual_device: actual_remote_device,
-                    actual_stream_cfg: actual_remote_config,
-                } => {
-                    let input_device_cfg = DeviceConfig {
-                        direction: DeviceDirection::Input,
-                        host_name: actual_remote_host,
-                        device_name: actual_remote_device,
-                        stream_cfg: actual_remote_config.parse()?,
-                    };
-                    info!(
-                        "Capturing remote input audio from {}, receiving on udp://{} and forwarding to local output device {}",
-                        input_device_cfg,
-                        udp_socket.local_addr()?.to_string(),
-                        output_device_cfg,
-                    );
+        // Process a message with a timeout
+        let frame = match timeout(SERVER_TIMEOUT, framed_stream.next()).await? {
+            Some(result) => result?,
+            None => {
+                return Err(anyhow::anyhow!(
+                    "Timeout waiting for message from tcp://{}",
+                    remote_addr
+                ));
+            }
+        };
 
-                    let cancel_token = CancellationToken::new();
-                    let cancel_token_clone = cancel_token.clone();
-                    let mut udp_task_handle = tokio::task::spawn_blocking(move || {
-                        // cpal::Stream is !Send so we must use a dedicated thread for the UdpServer
-                        let rt = Runtime::new().unwrap();
-                        rt.block_on(async {
-                            UdpServer::receive_audio(
-                                udp_socket,
-                                output_device,
-                                output_device_cfg.stream_cfg,
-                                buffer_frames,
-                                cancel_token_clone,
-                            )
-                            .await
-                            .ok();
-                        });
+        let message = rmp_serde::from_slice::<NetworkMessage>(&frame)?;
+
+        match message {
+            NetworkMessage::SendAudioResponse {
+                actual_host: actual_remote_host,
+                actual_device: actual_remote_device,
+                actual_stream_cfg: actual_remote_config,
+            } => {
+                let input_device_cfg = DeviceConfig {
+                    direction: DeviceDirection::Input,
+                    host_name: actual_remote_host,
+                    device_name: actual_remote_device,
+                    stream_cfg: actual_remote_config.parse()?,
+                };
+
+                info!("Actual local input device is {}", input_device_cfg,);
+
+                let cancel_token = CancellationToken::new();
+                let cancel_token_clone = cancel_token.clone();
+                let mut udp_task_handle = tokio::task::spawn_blocking(move || {
+                    // cpal::Stream is !Send so we must use a dedicated thread for the UdpServer
+                    let rt = Runtime::new().unwrap();
+                    rt.block_on(async {
+                        UdpServer::receive_audio(
+                            udp_socket,
+                            output_device,
+                            output_device_cfg,
+                            buffer_frames,
+                            cancel_token_clone,
+                        )
+                        .await
+                        .ok();
                     });
+                });
 
-                    select! {
-                        _ = &mut udp_task_handle => (),
-                        _ = signal::ctrl_c() => {
-                            cancel_token.cancel();
-                        }
+                select! {
+                    _ = framed_stream.next() => {
+                        // Any data means the server closed the connection
+                        cancel_token.cancel();
+                    },
+                    _ = &mut udp_task_handle => (),
+                    _ = signal::ctrl_c() => {
+                        cancel_token.cancel();
                     }
-
-                    info!("Closing connection to remote");
-
-                    framed.get_mut().shutdown().await?;
-                    udp_task_handle.await?;
                 }
-                _ => {
-                    error!("Unexpected response from remote");
-                    framed.get_mut().shutdown().await?;
-                }
+
+                framed_stream.get_mut().shutdown().await?;
+                udp_task_handle.await?;
+
+                info!("Remote connection closed");
+            }
+            _ => {
+                error!("Unexpected response from remote");
+                framed_stream.get_mut().shutdown().await?;
             }
         }
 
@@ -150,7 +160,7 @@ impl Client {
 
     pub async fn send(
         &self,
-        sock_addr: &SocketAddr,
+        remote_addr: &SocketAddr,
         input_host: &str,
         input_device: &Option<String>,
         input_config: &Option<StreamConfig>,
@@ -160,18 +170,20 @@ impl Client {
     ) -> anyhow::Result<()> {
         let (input_device, input_device_cfg, buffer_frames) =
             AudioCaps::get_input_device(input_host, input_device, input_config)?;
-        let stream = TcpStream::connect(sock_addr).await?;
+        let stream = TcpStream::connect(remote_addr).await?;
         let udp_socket = UdpSocket::bind("0.0.0.0:0").await?;
-        let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
+        let mut framed_stream = Framed::new(stream, LengthDelimitedCodec::new());
         let message = NetworkMessage::ReceiveAudio {
             host: output_host.to_string(),
             device: output_device.clone(),
             stream_cfg: output_config.as_ref().map(|x| x.to_string()),
         };
 
-        framed.send(to_vec(&message)?.into()).await?;
+        info!("Actual local input device is {}", input_device_cfg);
 
-        if let Some(result) = timeout(crate::SERVER_TIMEOUT, framed.next())
+        framed_stream.send(to_vec(&message)?.into()).await?;
+
+        if let Some(result) = timeout(crate::SERVER_TIMEOUT, framed_stream.next())
             .await
             .context("Timed out waiting for response from server")?
         {
@@ -193,12 +205,7 @@ impl Client {
                     };
                     let remote_udp_addr: SocketAddr = udp_addr.parse()?;
 
-                    info!(
-                        "Capturing local input device {}, sending via udp://{} to remote output device {}",
-                        input_device_cfg,
-                        remote_udp_addr,
-                        output_device_cfg,
-                    );
+                    info!("Actual remote output device is {}", output_device_cfg);
 
                     let cancel_token = CancellationToken::new();
                     let cancel_token_clone = cancel_token.clone();
@@ -210,7 +217,7 @@ impl Client {
                                 udp_socket,
                                 remote_udp_addr,
                                 input_device,
-                                input_device_cfg.stream_cfg,
+                                input_device_cfg,
                                 buffer_frames,
                                 cancel_token_clone,
                             )
@@ -220,20 +227,24 @@ impl Client {
                     });
 
                     select! {
+                        _ = framed_stream.next() => {
+                            // Any data means the server closed the connection
+                            cancel_token.cancel();
+                        },
                         _ = &mut udp_task_handle => (),
                         _ = signal::ctrl_c() => {
                             cancel_token.cancel();
                         }
                     }
 
-                    info!("Closing connection to remote");
-
-                    framed.get_mut().shutdown().await?;
+                    framed_stream.get_mut().shutdown().await?;
                     udp_task_handle.await?;
+
+                    info!("Remote connection closed");
                 }
                 _ => {
                     error!("Unexpected response from remote");
-                    framed.get_mut().shutdown().await?;
+                    framed_stream.get_mut().shutdown().await?;
                 }
             }
         }

@@ -1,11 +1,10 @@
-use crate::StreamConfig;
+use crate::DeviceConfig;
 use anyhow::bail;
 use cpal::{
     traits::{DeviceTrait, StreamTrait},
     Device, FromSample, InputCallbackInfo, OutputCallbackInfo, Sample, SampleFormat, SizedSample,
 };
 use dasp_sample::ToSample;
-use log::{debug, error, info, warn};
 use std::{
     collections::VecDeque,
     net::SocketAddr,
@@ -21,17 +20,17 @@ impl UdpServer {
         socket: UdpSocket,
         sock_addr: SocketAddr,
         device: Device,
-        stream_config: StreamConfig,
+        device_cfg: DeviceConfig,
         buffer_frames: u32,
         cancel_token: CancellationToken,
     ) -> Result<(), anyhow::Error> {
-        match stream_config.sample_format {
+        match device_cfg.stream_cfg.sample_format {
             SampleFormat::F32 => {
                 Self::gen_send_audio::<f32>(
                     &socket,
                     &sock_addr,
                     &device,
-                    &stream_config,
+                    &device_cfg,
                     buffer_frames,
                     cancel_token,
                 )
@@ -42,7 +41,7 @@ impl UdpServer {
                     &socket,
                     &sock_addr,
                     &device,
-                    &stream_config,
+                    &device_cfg,
                     buffer_frames,
                     cancel_token,
                 )
@@ -53,7 +52,7 @@ impl UdpServer {
                     &socket,
                     &sock_addr,
                     &device,
-                    &stream_config,
+                    &device_cfg,
                     buffer_frames,
                     cancel_token,
                 )
@@ -67,7 +66,7 @@ impl UdpServer {
         socket: &UdpSocket,
         sock_addr: &SocketAddr,
         device: &Device,
-        stream_config: &StreamConfig,
+        device_cfg: &DeviceConfig,
         buffer_frames: u32,
         cancel_token: CancellationToken,
     ) -> Result<(), anyhow::Error>
@@ -82,8 +81,8 @@ impl UdpServer {
         let audio_buffer_clone = audio_buffer.clone();
         let stream = device.build_input_stream(
             &cpal::StreamConfig {
-                channels: stream_config.channels,
-                sample_rate: cpal::SampleRate(stream_config.sample_rate),
+                channels: device_cfg.stream_cfg.channels,
+                sample_rate: cpal::SampleRate(device_cfg.stream_cfg.sample_rate),
                 buffer_size: cpal::BufferSize::Fixed(buffer_frames),
             },
             move |input: &[T], _: &InputCallbackInfo| {
@@ -97,7 +96,7 @@ impl UdpServer {
                 }
 
                 if audio_buffer_shrunk {
-                    debug!("Audio buffer shrunk");
+                    log::trace!("Audio buffer shrunk");
                 }
 
                 for sample in input.iter() {
@@ -108,19 +107,22 @@ impl UdpServer {
                 notify_clone.notify_one();
             },
             move |err| {
-                error!("Audio stream error - {}", err);
+                log::error!("Audio stream error - {}", err);
             },
             None,
         )?;
 
+        log::info!(
+            "Sending local input audio device {} to udp://{}",
+            device_cfg,
+            sock_addr,
+        );
+
         stream.play()?;
 
-        // It is expected that this loop will never exit, and will be called in the
-        // context of a tokio task which can be aborted.
         loop {
             select! {
                 _ = cancel_token.cancelled() => {
-                    info!("Stopping service");
                     break;
                 }
                 _ = notify.notified() => {}
@@ -129,7 +131,7 @@ impl UdpServer {
             {
                 let mut audio_buffer = audio_buffer.lock().unwrap();
 
-                debug!(
+                log::trace!(
                     "Audio buffer size: {} ({:.2}%)",
                     audio_buffer.len(),
                     audio_buffer.len() as f32 / audio_buffer.capacity() as f32 * 100.0
@@ -148,7 +150,7 @@ impl UdpServer {
                         packet_buffer.extend_from_slice(sample_slice);
 
                         // Duplicate the sample for mono input channels
-                        if stream_config.channels == 1 {
+                        if device_cfg.stream_cfg.channels == 1 {
                             packet_buffer.extend_from_slice(sample_slice);
                         }
                     }
@@ -158,35 +160,35 @@ impl UdpServer {
                     match socket.send_to(&packet_buffer, sock_addr).await {
                         Ok(len) => {
                             if len != packet_buffer.len() {
-                                warn!("Partial packet sent");
+                                log::warn!("Partial packet sent");
                             }
                         }
                         Err(e) => {
-                            // TODO(john): Don't log every error, maybe implement backoff with eventual hard failure
-                            error!("Failed to send audio packet to {} - {}", sock_addr, e);
+                            // TODO(john): Need to add Flume sender error handling here
+                            log::error!("Failed to send audio packet to {} - {}", sock_addr, e);
                         }
                     }
                 }
             }
         }
 
-        info!("Stopped UDP audio sender to {}", sock_addr);
+        log::info!("Stopped sending audio to udp://{}", sock_addr);
         return Ok(());
     }
 
     pub async fn receive_audio(
         socket: UdpSocket,
         device: Device,
-        stream_config: StreamConfig,
+        device_cfg: DeviceConfig,
         buffer_frames: u32,
         cancel_token: CancellationToken,
     ) -> anyhow::Result<()> {
-        match stream_config.sample_format {
+        match device_cfg.stream_cfg.sample_format {
             SampleFormat::F32 => {
                 Self::gen_receive_audio::<f32>(
                     &socket,
                     &device,
-                    &stream_config,
+                    &device_cfg,
                     buffer_frames,
                     cancel_token,
                 )
@@ -196,7 +198,7 @@ impl UdpServer {
                 Self::gen_receive_audio::<i16>(
                     &socket,
                     &device,
-                    &stream_config,
+                    &device_cfg,
                     buffer_frames,
                     cancel_token,
                 )
@@ -206,7 +208,7 @@ impl UdpServer {
                 Self::gen_receive_audio::<u16>(
                     &socket,
                     &device,
-                    &stream_config,
+                    &device_cfg,
                     buffer_frames,
                     cancel_token,
                 )
@@ -219,7 +221,7 @@ impl UdpServer {
     pub async fn gen_receive_audio<T>(
         udp_socket: &UdpSocket,
         device: &Device,
-        stream_config: &StreamConfig,
+        device_cfg: &DeviceConfig,
         buffer_frames: u32,
         cancel_token: CancellationToken,
     ) -> anyhow::Result<()>
@@ -231,15 +233,15 @@ impl UdpServer {
         let audio_buffer_clone = audio_buffer.clone();
         let stream = device.build_output_stream(
             &cpal::StreamConfig {
-                channels: stream_config.channels,
-                sample_rate: cpal::SampleRate(stream_config.sample_rate),
+                channels: device_cfg.stream_cfg.channels,
+                sample_rate: cpal::SampleRate(device_cfg.stream_cfg.sample_rate),
                 buffer_size: cpal::BufferSize::Fixed(buffer_frames),
             },
             move |output: &mut [T], _: &OutputCallbackInfo| {
                 let mut audio_buffer = audio_buffer_clone.lock().unwrap();
 
                 if audio_buffer.len() > 0 {
-                    debug!(
+                    log::trace!(
                         "Audio buffer length {} ({}%)",
                         audio_buffer.len(),
                         audio_buffer.len() as f32 / audio_buffer.capacity() as f32 * 100.0
@@ -255,10 +257,16 @@ impl UdpServer {
                 }
             },
             move |err| {
-                error!("Audio stream error - {}", err);
+                log::error!("Audio stream error - {}", err);
             },
             None,
         )?;
+
+        log::info!(
+            "Receiving udp://{} to local audio output device {}",
+            udp_socket.local_addr()?,
+            device_cfg,
+        );
 
         stream.play()?;
 
@@ -272,11 +280,10 @@ impl UdpServer {
                         Ok((len, _addr)) => {
                             packet_length = len;
                         }
-                        Err(e) => error!("Failed to receive audio packet - {}", e)
+                        Err(e) => log::error!("Failed to receive audio packet - {}", e)
                     }
                 }
                 _ = cancel_token.cancelled() => {
-                    info!("Stopping service");
                     break;
                 }
             }
@@ -290,19 +297,20 @@ impl UdpServer {
                         u64::from_le_bytes(packet_buffer[..size_of::<u64>()].try_into().unwrap());
                 } else {
                     // Packet too small
-                    debug!("Audio packet too small");
+                    log::trace!("Audio packet too small");
                     continue;
                 }
 
                 if next_sequence_number <= *sequence_number {
-                    debug!("Audio data length not divisible by sample size");
+                    log::trace!("Audio data length not divisible by sample size");
                     continue;
                 }
 
                 *sequence_number = next_sequence_number;
-                debug!(
+                log::trace!(
                     "Received packet {}, packet size: {}",
-                    next_sequence_number, packet_length,
+                    next_sequence_number,
+                    packet_length,
                 );
 
                 // Extract audio data
@@ -311,7 +319,7 @@ impl UdpServer {
                 // Convert bytes to samples
                 if audio_data.len() % size_of::<f32>() != 0 {
                     // Audio data length not divisible by sample size
-                    debug!("Audio data length not divisible by 4 bytes");
+                    log::trace!("Audio data length not divisible by 4 bytes");
                     continue;
                 }
 
@@ -327,7 +335,7 @@ impl UdpServer {
                     }
 
                     if audio_buffer_shrunk {
-                        debug!("Audio buffer shrunk - audio lost");
+                        log::trace!("Audio buffer shrunk - audio lost");
                     }
 
                     for chunk in audio_data_chunks {
@@ -338,7 +346,10 @@ impl UdpServer {
             }
         }
 
-        info!("Stopped UDP audio receiver on {}", udp_socket.local_addr()?);
+        log::info!(
+            "Stopped receiving audio from udp://{}",
+            udp_socket.local_addr()?
+        );
 
         Ok(())
     }
