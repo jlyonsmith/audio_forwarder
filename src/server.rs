@@ -146,12 +146,14 @@ impl Server {
                             _ = cancel_token_clone.cancelled() => {
                                 break;
                             }
-                            Some(Ok(bytes)) = framed_stream.next() => {
-                                debug!("Received {} bytes on TCP connection", bytes.len());
-                                if bytes.len() == 0 {
-                                    cancel_token_clone.cancel();
-                                    break;
-                                }
+                            frame = framed_stream.next() => {
+                                let _ = match frame {
+                                    Some(Ok(b)) => b,
+                                    _ => {
+                                        cancel_token_clone.cancel();
+                                        break;
+                                    }
+                                };
                             }
                         }
 
@@ -247,12 +249,14 @@ impl Server {
                             _ = cancel_token_clone.cancelled() => {
                                 break;
                             }
-                            Some(Ok(bytes)) = framed_stream.next() => {
-                                debug!("Received {} bytes on TCP connection", bytes.len());
-                                if bytes.len() == 0 {
-                                    cancel_token_clone.cancel();
-                                    break;
-                                }
+                            frame = framed_stream.next() => {
+                                let _ = match frame {
+                                    Some(Ok(b)) => b,
+                                    _ => {
+                                        cancel_token_clone.cancel();
+                                        break;
+                                    }
+                                };
                             }
                         }
 
