@@ -318,7 +318,9 @@ impl Server {
                 stream_cfg,
                 udp_addr,
             } => {
-                let remote_udp_addr = SocketAddr::from_str(&udp_addr)?;
+                // Use the same IP address as the TCP connection for the UDP address
+                let udp_addr: SocketAddr = udp_addr.parse()?;
+                let remote_udp_addr = SocketAddr::new(remote_addr.ip(), udp_addr.port());
 
                 self.handle_send_msg(
                     host,
