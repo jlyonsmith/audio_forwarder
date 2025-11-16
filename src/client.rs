@@ -11,6 +11,7 @@ use std::net::SocketAddr;
 use tokio::{
     io::AsyncWriteExt,
     net::{TcpStream, UdpSocket},
+    runtime::Runtime,
     select, signal,
     time::timeout,
 };
@@ -181,7 +182,7 @@ impl Client {
 
                     let cancel_token = CancellationToken::new();
                     let cancel_token_clone = cancel_token.clone();
-                    let udp_task_handle = tokio::task::spawn_blocking(move || {
+                    let mut udp_task_handle = tokio::task::spawn_blocking(move || {
                         // cpal::Stream is !Send so we must use a dedicated thread for the UdpServer
                         let rt = Runtime::new().unwrap();
                         rt.block_on(async {
@@ -198,7 +199,7 @@ impl Client {
                         });
                     });
                     select! {
-                        _ = udp_task_handle => (),
+                        _ = &mut udp_task_handle => (),
                         _ = signal::ctrl_c() => {
                             cancel_token.cancel();
                         }
