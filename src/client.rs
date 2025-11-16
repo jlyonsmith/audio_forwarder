@@ -11,6 +11,7 @@ use std::net::SocketAddr;
 use tokio::{
     io::AsyncWriteExt,
     net::{TcpStream, UdpSocket},
+    select, signal,
     time::timeout,
 };
 use tokio_util::{
@@ -179,18 +180,34 @@ impl Client {
                     );
 
                     let cancel_token = CancellationToken::new();
+                    let cancel_token_clone = cancel_token.clone();
+                    let udp_task_handle = tokio::task::spawn_blocking(move || {
+                        // cpal::Stream is !Send so we must use a dedicated thread for the UdpServer
+                        let rt = Runtime::new().unwrap();
+                        rt.block_on(async {
+                            UdpServer::send_audio(
+                                udp_socket,
+                                remote_udp_addr,
+                                input_device,
+                                input_device_cfg.stream_cfg,
+                                buffer_frames,
+                                cancel_token_clone,
+                            )
+                            .await
+                            .ok();
+                        });
+                    });
+                    select! {
+                        _ = udp_task_handle => (),
+                        _ = signal::ctrl_c() => {
+                            cancel_token.cancel();
+                        }
+                    }
 
-                    // TODO(john): Loop and graceful shutdown on Ctrl+C
+                    info!("Closing connection to remote");
 
-                    UdpServer::send_audio(
-                        udp_socket,
-                        remote_udp_addr,
-                        input_device,
-                        input_device_cfg.stream_cfg,
-                        buffer_frames,
-                        cancel_token,
-                    )
-                    .await?;
+                    framed.get_mut().shutdown().await?;
+                    udp_task_handle.await?;
                 }
                 _ => {
                     error!("Unexpected response from remote");

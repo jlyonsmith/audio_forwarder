@@ -3,7 +3,7 @@ use crate::{DeviceConfig, StreamConfig, SERVER_TIMEOUT};
 use anyhow::Context;
 use env_logger::Env;
 use futures::{future::join_all, SinkExt, StreamExt};
-use log::{debug, error, info, LevelFilter};
+use log::{error, info, LevelFilter};
 use rmp_serde::to_vec;
 use std::{
     net::SocketAddr,
