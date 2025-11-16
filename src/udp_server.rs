@@ -11,7 +11,7 @@ use std::{
     net::SocketAddr,
     sync::{Arc, Mutex},
 };
-use tokio::{net::UdpSocket, select, signal, sync::Notify};
+use tokio::{net::UdpSocket, select, sync::Notify};
 use tokio_util::sync::CancellationToken;
 
 pub struct UdpServer {}
@@ -118,12 +118,13 @@ impl UdpServer {
         // It is expected that this loop will never exit, and will be called in the
         // context of a tokio task which can be aborted.
         loop {
-            if cancel_token.is_cancelled() {
-                break;
+            select! {
+                _ = cancel_token.cancelled() => {
+                    info!("Stopping service");
+                    break;
+                }
+                _ = notify.notified() => {}
             }
-
-            // Wait for the audio buffer to be ready
-            notify.notified().await;
 
             {
                 let mut audio_buffer = audio_buffer.lock().unwrap();
@@ -169,7 +170,7 @@ impl UdpServer {
             }
         }
 
-        debug!("Stopped UDP audio sender");
+        info!("Stopped UDP audio sender to {}", sock_addr);
         return Ok(());
     }
 
@@ -216,7 +217,7 @@ impl UdpServer {
     }
 
     pub async fn gen_receive_audio<T>(
-        socket: &UdpSocket,
+        udp_socket: &UdpSocket,
         device: &Device,
         stream_config: &StreamConfig,
         buffer_frames: u32,
@@ -265,12 +266,8 @@ impl UdpServer {
         let mut packet_length = 0;
 
         loop {
-            if cancel_token.is_cancelled() {
-                break;
-            }
-
             select! {
-                socket_result = socket.recv_from(&mut packet_buffer) => {
+                socket_result = udp_socket.recv_from(&mut packet_buffer) => {
                     match socket_result {
                         Ok((len, _addr)) => {
                             packet_length = len;
@@ -278,7 +275,7 @@ impl UdpServer {
                         Err(e) => error!("Failed to receive audio packet - {}", e)
                     }
                 }
-                _ = signal::ctrl_c() => {
+                _ = cancel_token.cancelled() => {
                     info!("Stopping service");
                     break;
                 }
@@ -341,7 +338,8 @@ impl UdpServer {
             }
         }
 
-        debug!("Stopped UDP audio receiver");
+        info!("Stopped UDP audio receiver on {}", udp_socket.local_addr()?);
+
         Ok(())
     }
 }

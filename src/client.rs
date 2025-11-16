@@ -109,19 +109,39 @@ impl Client {
                     );
 
                     let cancel_token = CancellationToken::new();
+                    let cancel_token_clone = cancel_token.clone();
+                    let mut udp_task_handle = tokio::task::spawn_blocking(move || {
+                        // cpal::Stream is !Send so we must use a dedicated thread for the UdpServer
+                        let rt = Runtime::new().unwrap();
+                        rt.block_on(async {
+                            UdpServer::receive_audio(
+                                udp_socket,
+                                output_device,
+                                output_device_cfg.stream_cfg,
+                                buffer_frames,
+                                cancel_token_clone,
+                            )
+                            .await
+                            .ok();
+                        });
+                    });
 
-                    // TODO(john): Loop and graceful shutdown on Ctrl+C
+                    select! {
+                        _ = &mut udp_task_handle => (),
+                        _ = signal::ctrl_c() => {
+                            cancel_token.cancel();
+                        }
+                    }
 
-                    UdpServer::receive_audio(
-                        udp_socket,
-                        output_device,
-                        output_device_cfg.stream_cfg,
-                        buffer_frames,
-                        cancel_token,
-                    )
-                    .await?;
+                    info!("Closing connection to remote");
+
+                    framed.get_mut().shutdown().await?;
+                    udp_task_handle.await?;
                 }
-                _ => bail!("Unexpected response from remote"),
+                _ => {
+                    error!("Unexpected response from remote");
+                    framed.get_mut().shutdown().await?;
+                }
             }
         }
 
@@ -198,6 +218,7 @@ impl Client {
                             .ok();
                         });
                     });
+
                     select! {
                         _ = &mut udp_task_handle => (),
                         _ = signal::ctrl_c() => {

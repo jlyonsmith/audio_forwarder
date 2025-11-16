@@ -141,6 +141,7 @@ impl Server {
 
                 let cancel_token_clone = cancel_token.clone();
                 let socket_task_handle = tokio::spawn(async move {
+                    // TODO(john): this could be a shared function with the receive case below
                     loop {
                         select! {
                             _ = cancel_token_clone.cancelled() => {
@@ -148,17 +149,15 @@ impl Server {
                             }
                             frame = framed_stream.next() => {
                                 let _ = match frame {
-                                    Some(Ok(b)) => b,
+                                    Some(Ok(_)) => (),
                                     _ => {
                                         cancel_token_clone.cancel();
-                                        break;
                                     }
                                 };
                             }
                         }
-
-                        info!("Close TCP connection to {}", remote_addr);
                     }
+                    info!("Closed TCP connection to {}", remote_addr);
                 });
 
                 {
@@ -251,17 +250,16 @@ impl Server {
                             }
                             frame = framed_stream.next() => {
                                 let _ = match frame {
-                                    Some(Ok(b)) => b,
+                                    Some(Ok(_)) => (),
                                     _ => {
                                         cancel_token_clone.cancel();
-                                        break;
+                                        ()
                                     }
                                 };
                             }
                         }
-
-                        info!("Close TCP connection to {}", remote_addr);
                     }
+                    info!("Closed TCP connection to {}", remote_addr);
                 });
 
                 {
@@ -314,8 +312,7 @@ impl Server {
         {
             let mut locked_map = self.handle_map.lock().unwrap();
 
-            for (device_cfg, info) in locked_map.drain() {
-                info!("Stopping stream for device {}", &device_cfg);
+            for (_, info) in locked_map.drain() {
                 info.cancel_token.cancel();
                 handles.push(info.udp_task_handle);
                 handles.push(info.socket_task_handle);
