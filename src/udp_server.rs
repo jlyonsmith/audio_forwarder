@@ -164,7 +164,8 @@ impl UdpServer {
                             }
                         }
                         Err(e) => {
-                            // TODO(john): Need to add Flume sender error handling here
+                            // TODO(john): Need to add Flume sender error handling here, but first
+                            // we need to decide how to handle errors in the UDP sending task
                             log::error!("Failed to send audio packet to {} - {}", sock_addr, e);
                         }
                     }
@@ -280,7 +281,11 @@ impl UdpServer {
                         Ok((len, _addr)) => {
                             packet_length = len;
                         }
-                        Err(e) => log::error!("Failed to receive audio packet - {}", e)
+                        Err(e) => {
+                            // TODO(john): Need to add Flume sender error handling here, but first
+                            // we need to decide how to handle errors in the UDP receiving task
+                            log::error!("Failed to receive audio packet - {}", e)
+                        }
                     }
                 }
                 _ = cancel_token.cancelled() => {

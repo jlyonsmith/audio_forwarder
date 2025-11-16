@@ -71,7 +71,6 @@ impl Client {
         let (output_device, output_device_cfg, buffer_frames) =
             AudioCaps::get_output_device(output_host, output_device, output_stream_config)?;
         let socket = TcpStream::connect(remote_addr).await?;
-        // TODO(john): Will need to give a specific IP address to bind too
         let udp_socket = UdpSocket::bind("0.0.0.0:0")
             .await
             .context("Failed to bind UDP socket")?;
