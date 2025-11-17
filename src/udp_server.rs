@@ -73,6 +73,12 @@ impl UdpServer {
     where
         T: SizedSample + Sample + ToSample<f32>,
     {
+        if device_cfg.stream_cfg.channels != 1 && device_cfg.stream_cfg.channels != 2 {
+            return Err(anyhow::anyhow!(
+                "Only 1 or 2 channels are supported on input device"
+            ));
+        }
+
         let mut sequence_number = 0u64;
         let notify = Arc::new(Notify::new());
         let notify_clone = notify.clone();
@@ -84,6 +90,7 @@ impl UdpServer {
                 channels: device_cfg.stream_cfg.channels,
                 sample_rate: cpal::SampleRate(device_cfg.stream_cfg.sample_rate),
                 buffer_size: cpal::BufferSize::Fixed(buffer_frames),
+                // buffer_size: cpal::BufferSize::Default,
             },
             move |input: &[T], _: &InputCallbackInfo| {
                 let mut audio_buffer = audio_buffer_clone.lock().unwrap();
@@ -132,7 +139,7 @@ impl UdpServer {
                 let mut audio_buffer = audio_buffer.lock().unwrap();
 
                 log::trace!(
-                    "Audio buffer size: {} ({:.2}%)",
+                    "Audio buffer length: {} ({:.2}%)",
                     audio_buffer.len(),
                     audio_buffer.len() as f32 / audio_buffer.capacity() as f32 * 100.0
                 );
@@ -152,6 +159,11 @@ impl UdpServer {
                         // Duplicate the sample for mono input channels
                         if device_cfg.stream_cfg.channels == 1 {
                             packet_buffer.extend_from_slice(sample_slice);
+                        } else {
+                            // TODO(john): Add a flag to copy left or right channel over the other
+                            // to support devices that have stereo input but only one channel is used
+                            // We will use the same sample_slice again and pop the next sample from
+                            // the audio_buffer
                         }
                     }
 
@@ -164,8 +176,7 @@ impl UdpServer {
                             }
                         }
                         Err(e) => {
-                            // TODO(john): Need to add Flume sender error handling here, but first
-                            // we need to decide how to handle errors in the UDP sending task
+                            // TODO(john): Decide how to handle errors in the UDP sending task
                             log::error!("Failed to send audio packet to {} - {}", sock_addr, e);
                         }
                     }
@@ -174,7 +185,7 @@ impl UdpServer {
         }
 
         log::info!("Stopped sending audio to udp://{}", sock_addr);
-        return Ok(());
+        Ok(())
     }
 
     pub async fn receive_audio(
@@ -229,9 +240,22 @@ impl UdpServer {
     where
         T: SizedSample + FromSample<f32>,
     {
+        if device_cfg.stream_cfg.channels != 2 {
+            return Err(anyhow::anyhow!(
+                "Only 2 channels are supported on output device"
+            ));
+        }
+
         let mut packet_buffer = vec![0u8; crate::MTU];
         let audio_buffer = Arc::new(Mutex::new(VecDeque::with_capacity(1024 * 16)));
         let audio_buffer_clone = audio_buffer.clone();
+
+        log::debug!(
+            "Starting receive audio task {} (frames {})",
+            device_cfg,
+            buffer_frames
+        );
+
         let stream = device.build_output_stream(
             &cpal::StreamConfig {
                 channels: device_cfg.stream_cfg.channels,
@@ -282,8 +306,7 @@ impl UdpServer {
                             packet_length = len;
                         }
                         Err(e) => {
-                            // TODO(john): Need to add Flume sender error handling here, but first
-                            // we need to decide how to handle errors in the UDP receiving task
+                            // TODO(john): Decide how to handle errors in the UDP receiving task
                             log::error!("Failed to receive audio packet - {}", e)
                         }
                     }

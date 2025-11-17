@@ -184,6 +184,7 @@ impl Server {
                 )
                 .await
                 .ok();
+                // TODO(john): Output errors and device_id to channel
             });
         });
 
@@ -264,6 +265,7 @@ impl Server {
                 )
                 .await
                 .ok();
+                // TODO(john): Output errors and device_id to channel
             });
         });
 
