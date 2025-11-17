@@ -95,7 +95,12 @@ impl Server {
         if let Some(info) = locked_map.remove(device_id) {
             info!("Disconnect from {}", info.remote_addr);
             info.cancel_token.cancel();
-            join_all([info.udp_task_handle, info.socket_task_handle]).await;
+            join_all(
+                vec![info.udp_task_handle, info.socket_task_handle]
+                    .iter_mut()
+                    .filter(|h| !h.is_finished()),
+            )
+            .await;
         }
     }
 
@@ -112,7 +117,7 @@ impl Server {
             }
         }
 
-        join_all(handles.into_iter()).await;
+        join_all(handles.into_iter().filter(|h| !h.is_finished())).await;
     }
 
     async fn handle_list_msg(
