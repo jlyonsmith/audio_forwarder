@@ -12,12 +12,14 @@ This program allows you to forward audio from one physical computer to another o
 Audio transmission can be from an input or output device on one computer to a corresponding output or
 input device on the other computer.
 
-First run one instance of the program in `listen` mode. Then one or more instances of the program can
-connect to this audio server to `send` or `receive` audio. The server is persistent and will continue
-to listen for incoming connections until it is stopped.
+First run one instance of the program in `listen` mode on the remote computer. The server is persistent and will continue
+to listen for incoming connections until it is stopped. Note, at this point you have not specified
+any audio devices.
 
-Senders or receivers remain connected until they are stopped, at which point they will disconnect from the
-listening process. This frees up audio devices on the server for other clients to use.
+Next, run one or more instances of the program on your local computer to `send` or `receive` audio to the remote.
+At this point you specify the local and remote audio sources.  These senders or receivers continue until they are stopped,
+at which point they will disconnect from the remote. This frees up the audio devices on the local and remote. If
+there is transmission problem this will also cause the two processes to disconnect.
 
 This tool uses the [`cpal`](https://crates.io/crates/cpal) Rust crate to access the host audio devices.
 CPAL defines audio using 3 parameters:

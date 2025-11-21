@@ -1,13 +1,12 @@
 use crate::{
     audio_caps::AudioCaps, messages::NetworkMessage, udp_server::UdpServer, StreamConfig,
-    SERVER_TIMEOUT,
+    METRICS_SERVER_SOCKADDR, SERVER_TIMEOUT,
 };
 use anyhow::Context;
 use env_logger::Env;
 use flume::Sender;
 use futures::{future::join_all, SinkExt, StreamExt};
 use log::{error, info, LevelFilter};
-#[cfg(feature = "metrics")]
 use metrics_exporter_tcp::TcpBuilder;
 use rmp_serde::to_vec;
 use std::{
@@ -373,15 +372,12 @@ impl Server {
         let (sender, receiver) = flume::unbounded::<String>();
         let listener = TcpListener::bind(local_addr).await?;
 
-        #[cfg(feature = "metrics")]
-        {
-            let metrics_builder = TcpBuilder::new().listen_address(METRICS_SERVER_SOCKADDR);
+        let metrics_builder = TcpBuilder::new().listen_address(METRICS_SERVER_SOCKADDR);
 
-            metrics_builder.install().context(format!(
-                "Unable to start metrics collection on {}",
-                METRICS_SERVER_SOCKADDR
-            ))?;
-        }
+        metrics_builder.install().context(format!(
+            "Unable to start metrics collection on {}",
+            METRICS_SERVER_SOCKADDR
+        ))?;
 
         info!("Server listening on {}", local_addr);
 

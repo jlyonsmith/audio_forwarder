@@ -4,8 +4,7 @@ use cpal::{
     Device, FromSample, InputCallbackInfo, OutputCallbackInfo, Sample, SampleFormat, SizedSample,
 };
 use dasp_sample::ToSample;
-#[cfg(feature = "metrics")]
-use metrics::{describe_gauge, gauge};
+use metrics::{counter, describe_counter, describe_gauge, gauge, Unit};
 use std::{
     collections::VecDeque,
     net::SocketAddr,
@@ -79,48 +78,74 @@ impl UdpServer {
         let audio_buffer = Arc::new(Mutex::new(VecDeque::with_capacity(1024 * 16)));
         let audio_buffer_clone = audio_buffer.clone();
 
-        #[cfg(feature = "metrics")]
-        {
-            let buffer_used_gauge_name = format!(
-                "audio_buffer_used_{}",
-                device_cfg.to_string().replace('|', "_")
-            );
-            let buffer_percent_full_gauge_name = format!(
-                "audio_buffer_percent_full_{}",
-                device_cfg.to_string().replace('|', "_")
-            );
+        let buffer_used_gauge_name = format!(
+            "audio_buffer_used_{}",
+            device_cfg.to_string().replace('|', "_")
+        );
+        let buffer_percent_full_gauge_name = format!(
+            "audio_buffer_percent_full_{}",
+            device_cfg.to_string().replace('|', "_")
+        );
+        let buffer_truncated_counter_name = format!(
+            "audio_buffer_truncated_{}",
+            device_cfg.to_string().replace('|', "_")
+        );
+        let partial_send_counter_name = format!(
+            "audio_buffer_partial_send_{}",
+            device_cfg.to_string().replace('|', "_")
+        );
+        let send_error_counter_name = format!(
+            "audio_buffer_partial_send_{}",
+            device_cfg.to_string().replace('|', "_")
+        );
 
-            describe_gauge!(
-                buffer_used_gauge_name.to_owned(),
-                "Length of the audio buffer in samples"
-            );
-            describe_gauge!(
-                buffer_percent_full_gauge_name.to_owned(),
-                "Percentage of the audio buffer that is full"
-            );
-            let audio_buffer_used_gauge = gauge!(buffer_used_gauge_name);
-            let audio_buffer_percent_full_gauge = gauge!(buffer_percent_full_gauge_name);
-        }
+        describe_gauge!(
+            buffer_used_gauge_name.to_owned(),
+            Unit::Bytes,
+            "Length of the audio buffer in samples"
+        );
+        describe_gauge!(
+            buffer_percent_full_gauge_name.to_owned(),
+            Unit::Percent,
+            "Percentage of the audio buffer that is full"
+        );
+        describe_counter!(
+            buffer_truncated_counter_name.to_owned(),
+            Unit::Count,
+            "Audio buffer was truncated to prevent overflow"
+        );
+        describe_counter!(
+            partial_send_counter_name.to_owned(),
+            Unit::Count,
+            "Samples dropped due to partial UDP buffer sends"
+        );
+        describe_counter!(
+            send_error_counter_name.to_owned(),
+            Unit::Count,
+            "Audio buffer UDP send errors"
+        );
+        let audio_buffer_used_gauge = gauge!(buffer_used_gauge_name);
+        let audio_buffer_percent_full_gauge = gauge!(buffer_percent_full_gauge_name);
+        let audio_buffer_truncated_counter = counter!(buffer_truncated_counter_name);
+        let audio_partial_send_counter = counter!(partial_send_counter_name);
+        let audio_send_error_counter = counter!(send_error_counter_name);
 
         let stream = device.build_input_stream(
             &cpal::StreamConfig {
                 channels: device_cfg.stream_cfg.channels,
                 sample_rate: cpal::SampleRate(device_cfg.stream_cfg.sample_rate),
                 buffer_size: cpal::BufferSize::Fixed(buffer_frames),
-                // buffer_size: cpal::BufferSize::Default,
             },
             move |input: &[T], _: &InputCallbackInfo| {
                 let mut audio_buffer = audio_buffer_clone.lock().unwrap();
-                let mut audio_buffer_shrunk = false;
 
                 // Prevent buffer overflow
-                while audio_buffer.len() + input.len() > audio_buffer.capacity() {
-                    audio_buffer.pop_front();
-                    audio_buffer_shrunk = true;
-                }
+                if audio_buffer.len() + input.len() > audio_buffer.capacity() {
+                    while audio_buffer.len() + input.len() > audio_buffer.capacity() {
+                        audio_buffer.pop_front();
+                    }
 
-                if audio_buffer_shrunk {
-                    log::trace!("Audio buffer shrunk");
+                    audio_buffer_truncated_counter.increment(1);
                 }
 
                 for sample in input.iter() {
@@ -155,13 +180,10 @@ impl UdpServer {
             {
                 let mut audio_buffer = audio_buffer.lock().unwrap();
 
-                #[cfg(feature = "metrics")]
-                {
-                    audio_buffer_used_gauge.set(audio_buffer.len() as f64);
-                    audio_buffer_percent_full_gauge.set(
-                        (audio_buffer.len() as f32 / audio_buffer.capacity() as f32 * 100.0) as f64,
-                    );
-                }
+                audio_buffer_used_gauge.set(audio_buffer.len() as f64);
+                audio_buffer_percent_full_gauge.set(
+                    100.0 * (audio_buffer.len() as f32 / audio_buffer.capacity() as f32) as f64,
+                );
 
                 // Convert audio samples to bytes and send in UDP packets
                 while !audio_buffer.is_empty() {
@@ -193,12 +215,13 @@ impl UdpServer {
                     match socket.send_to(&packet_buffer, sock_addr).await {
                         Ok(len) => {
                             if len != packet_buffer.len() {
-                                log::warn!("Partial packet sent");
+                                audio_partial_send_counter.increment(1);
                             }
                         }
-                        Err(e) => {
-                            // TODO(john): Decide how to handle errors in the UDP sending task
-                            log::error!("Failed to send audio packet to {} - {}", sock_addr, e);
+                        Err(_e) => {
+                            // TODO(john): Should write at least some of the errors to the log
+                            //log::debug!("Failed to send audio packet to - {}", _e);
+                            audio_send_error_counter.increment(1);
                         }
                     }
                 }
@@ -267,7 +290,8 @@ impl UdpServer {
             &cpal::StreamConfig {
                 channels: device_cfg.stream_cfg.channels,
                 sample_rate: cpal::SampleRate(device_cfg.stream_cfg.sample_rate),
-                buffer_size: cpal::BufferSize::Fixed(buffer_frames),
+                //buffer_size: cpal::BufferSize::Fixed(buffer_frames),
+                buffer_size: cpal::BufferSize::Default,
             },
             move |output: &mut [T], _: &OutputCallbackInfo| {
                 let mut audio_buffer = audio_buffer_clone.lock().unwrap();

@@ -1,15 +1,12 @@
-#[cfg(feature = "metrics")]
-use crate::METRICS_CLIENT_SOCKADDR;
 use crate::{
     audio_caps::AudioCaps, messages::NetworkMessage, stream_config::StreamConfig,
-    udp_server::UdpServer, DeviceConfig, DeviceDirection, SERVER_TIMEOUT,
+    udp_server::UdpServer, DeviceConfig, DeviceDirection, METRICS_CLIENT_SOCKADDR, SERVER_TIMEOUT,
 };
 use anyhow::{bail, Context};
 use cpal::SampleFormat;
 use env_logger::Env;
 use futures::{SinkExt, StreamExt};
 use log::{error, info, LevelFilter};
-#[cfg(feature = "metrics")]
 use metrics_exporter_tcp::TcpBuilder;
 use rmp_serde::to_vec;
 use std::net::SocketAddr;
@@ -86,15 +83,12 @@ impl Client {
         input_device: &Option<String>,
         input_stream_config: &Option<StreamConfig>,
     ) -> anyhow::Result<()> {
-        #[cfg(feature = "metrics")]
-        {
-            let metrics_builder = TcpBuilder::new().listen_address(METRICS_CLIENT_SOCKADDR);
+        let metrics_builder = TcpBuilder::new().listen_address(METRICS_CLIENT_SOCKADDR);
 
-            metrics_builder.install().context(format!(
-                "Unable to start metrics collection on {}",
-                METRICS_CLIENT_SOCKADDR
-            ))?;
-        }
+        metrics_builder.install().context(format!(
+            "Unable to start metrics collection on {}",
+            METRICS_CLIENT_SOCKADDR
+        ))?;
 
         let (output_device, output_device_cfg, buffer_frames) =
             AudioCaps::get_output_device(output_host, output_device, output_stream_config)?;
@@ -214,15 +208,12 @@ impl Client {
         output_device: &Option<String>,
         output_config: &Option<StreamConfig>,
     ) -> anyhow::Result<()> {
-        #[cfg(feature = "metrics")]
-        {
-            let metrics_builder = TcpBuilder::new().listen_address(METRICS_CLIENT_SOCKADDR);
+        let metrics_builder = TcpBuilder::new().listen_address(METRICS_CLIENT_SOCKADDR);
 
-            metrics_builder.install().context(format!(
-                "Unable to start metrics collection on {}",
-                METRICS_CLIENT_SOCKADDR
-            ))?;
-        }
+        metrics_builder.install().context(format!(
+            "Unable to start metrics collection on {}",
+            METRICS_CLIENT_SOCKADDR
+        ))?;
 
         let (input_device, input_device_cfg, buffer_frames) =
             AudioCaps::get_input_device(input_host, input_device, input_config)?;
