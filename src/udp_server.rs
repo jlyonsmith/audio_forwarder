@@ -1,10 +1,11 @@
 use crate::DeviceConfig;
-use anyhow::bail;
 use cpal::{
     traits::{DeviceTrait, StreamTrait},
     Device, FromSample, InputCallbackInfo, OutputCallbackInfo, Sample, SampleFormat, SizedSample,
 };
 use dasp_sample::ToSample;
+#[cfg(feature = "metrics")]
+use metrics::{describe_gauge, gauge};
 use std::{
     collections::VecDeque,
     net::SocketAddr,
@@ -24,9 +25,15 @@ impl UdpServer {
         buffer_frames: u32,
         cancel_token: CancellationToken,
     ) -> Result<(), anyhow::Error> {
+        if device_cfg.stream_cfg.channels != 1 && device_cfg.stream_cfg.channels != 2 {
+            return Err(anyhow::anyhow!(
+                "Only 1 or 2 channels are supported on input device"
+            ));
+        }
+
         match device_cfg.stream_cfg.sample_format {
             SampleFormat::F32 => {
-                Self::gen_send_audio::<f32>(
+                Self::inner_send_audio::<f32>(
                     &socket,
                     &sock_addr,
                     &device,
@@ -37,7 +44,7 @@ impl UdpServer {
                 .await
             }
             SampleFormat::I16 => {
-                Self::gen_send_audio::<i16>(
+                Self::inner_send_audio::<i32>(
                     &socket,
                     &sock_addr,
                     &device,
@@ -47,22 +54,13 @@ impl UdpServer {
                 )
                 .await
             }
-            SampleFormat::U16 => {
-                Self::gen_send_audio::<u16>(
-                    &socket,
-                    &sock_addr,
-                    &device,
-                    &device_cfg,
-                    buffer_frames,
-                    cancel_token,
-                )
-                .await
-            }
-            _ => bail!("Unsupported sample format on input device"),
+            _ => Err(anyhow::anyhow!(
+                "Only f32 and i16 sample formats are supported on input device"
+            )),
         }
     }
 
-    async fn gen_send_audio<T>(
+    async fn inner_send_audio<T>(
         socket: &UdpSocket,
         sock_addr: &SocketAddr,
         device: &Device,
@@ -73,18 +71,37 @@ impl UdpServer {
     where
         T: SizedSample + Sample + ToSample<f32>,
     {
-        if device_cfg.stream_cfg.channels != 1 && device_cfg.stream_cfg.channels != 2 {
-            return Err(anyhow::anyhow!(
-                "Only 1 or 2 channels are supported on input device"
-            ));
-        }
-
         let mut sequence_number = 0u64;
         let notify = Arc::new(Notify::new());
         let notify_clone = notify.clone();
         let mut packet_buffer = Vec::with_capacity(crate::MTU);
+        // TODO(john): Calculate buffer size based on input parameters
         let audio_buffer = Arc::new(Mutex::new(VecDeque::with_capacity(1024 * 16)));
         let audio_buffer_clone = audio_buffer.clone();
+
+        #[cfg(feature = "metrics")]
+        {
+            let buffer_used_gauge_name = format!(
+                "audio_buffer_used_{}",
+                device_cfg.to_string().replace('|', "_")
+            );
+            let buffer_percent_full_gauge_name = format!(
+                "audio_buffer_percent_full_{}",
+                device_cfg.to_string().replace('|', "_")
+            );
+
+            describe_gauge!(
+                buffer_used_gauge_name.to_owned(),
+                "Length of the audio buffer in samples"
+            );
+            describe_gauge!(
+                buffer_percent_full_gauge_name.to_owned(),
+                "Percentage of the audio buffer that is full"
+            );
+            let audio_buffer_used_gauge = gauge!(buffer_used_gauge_name);
+            let audio_buffer_percent_full_gauge = gauge!(buffer_percent_full_gauge_name);
+        }
+
         let stream = device.build_input_stream(
             &cpal::StreamConfig {
                 channels: device_cfg.stream_cfg.channels,
@@ -138,32 +155,36 @@ impl UdpServer {
             {
                 let mut audio_buffer = audio_buffer.lock().unwrap();
 
-                log::trace!(
-                    "Audio buffer length: {} ({:.2}%)",
-                    audio_buffer.len(),
-                    audio_buffer.len() as f32 / audio_buffer.capacity() as f32 * 100.0
-                );
+                #[cfg(feature = "metrics")]
+                {
+                    audio_buffer_used_gauge.set(audio_buffer.len() as f64);
+                    audio_buffer_percent_full_gauge.set(
+                        (audio_buffer.len() as f32 / audio_buffer.capacity() as f32 * 100.0) as f64,
+                    );
+                }
 
+                // Convert audio samples to bytes and send in UDP packets
                 while !audio_buffer.is_empty() {
                     packet_buffer.clear();
                     packet_buffer.extend_from_slice(&sequence_number.to_le_bytes());
 
-                    while !audio_buffer.is_empty()
-                        && packet_buffer.len() + 2 * size_of::<f32>() <= crate::MTU
-                    {
-                        let sample = audio_buffer.pop_front().unwrap();
-                        let sample_slice = &sample.to_le_bytes();
+                    if device_cfg.stream_cfg.channels == 1 {
+                        while !audio_buffer.is_empty()
+                            && packet_buffer.len() + 2 * size_of::<f32>() <= crate::MTU
+                        {
+                            let sample_slice = &audio_buffer.pop_front().unwrap().to_le_bytes();
 
-                        packet_buffer.extend_from_slice(sample_slice);
-
-                        // Duplicate the sample for mono input channels
-                        if device_cfg.stream_cfg.channels == 1 {
+                            // Double mono samples for stereo output
                             packet_buffer.extend_from_slice(sample_slice);
-                        } else {
-                            // TODO(john): Add a flag to copy left or right channel over the other
-                            // to support devices that have stereo input but only one channel is used
-                            // We will use the same sample_slice again and pop the next sample from
-                            // the audio_buffer
+                            packet_buffer.extend_from_slice(sample_slice);
+                        }
+                    } else {
+                        while !audio_buffer.is_empty()
+                            && packet_buffer.len() + 2 * size_of::<f32>() <= crate::MTU
+                        {
+                            let sample_slice = &audio_buffer.pop_front().unwrap().to_le_bytes();
+
+                            packet_buffer.extend_from_slice(sample_slice);
                         }
                     }
 
@@ -195,19 +216,15 @@ impl UdpServer {
         buffer_frames: u32,
         cancel_token: CancellationToken,
     ) -> anyhow::Result<()> {
+        if device_cfg.stream_cfg.channels != 2 {
+            return Err(anyhow::anyhow!(
+                "Only 2 channels are supported on output device"
+            ));
+        }
+
         match device_cfg.stream_cfg.sample_format {
             SampleFormat::F32 => {
-                Self::gen_receive_audio::<f32>(
-                    &socket,
-                    &device,
-                    &device_cfg,
-                    buffer_frames,
-                    cancel_token,
-                )
-                .await
-            }
-            SampleFormat::I16 => {
-                Self::gen_receive_audio::<i16>(
+                Self::inner_receive_audio::<f32>(
                     &socket,
                     &device,
                     &device_cfg,
@@ -217,7 +234,7 @@ impl UdpServer {
                 .await
             }
             SampleFormat::U16 => {
-                Self::gen_receive_audio::<u16>(
+                Self::inner_receive_audio::<i32>(
                     &socket,
                     &device,
                     &device_cfg,
@@ -226,11 +243,13 @@ impl UdpServer {
                 )
                 .await
             }
-            _ => bail!("Unsupported sample format on output device"),
+            _ => Err(anyhow::anyhow!(
+                "Only f32 and i32 sample formats are supported on output device"
+            )),
         }
     }
 
-    pub async fn gen_receive_audio<T>(
+    pub async fn inner_receive_audio<T>(
         udp_socket: &UdpSocket,
         device: &Device,
         device_cfg: &DeviceConfig,
@@ -240,22 +259,10 @@ impl UdpServer {
     where
         T: SizedSample + FromSample<f32>,
     {
-        if device_cfg.stream_cfg.channels != 2 {
-            return Err(anyhow::anyhow!(
-                "Only 2 channels are supported on output device"
-            ));
-        }
-
         let mut packet_buffer = vec![0u8; crate::MTU];
+        // TODO(john): Calculate buffer size based on input parameters
         let audio_buffer = Arc::new(Mutex::new(VecDeque::with_capacity(1024 * 16)));
         let audio_buffer_clone = audio_buffer.clone();
-
-        log::debug!(
-            "Starting receive audio task {} (frames {})",
-            device_cfg,
-            buffer_frames
-        );
-
         let stream = device.build_output_stream(
             &cpal::StreamConfig {
                 channels: device_cfg.stream_cfg.channels,

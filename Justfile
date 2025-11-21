@@ -11,13 +11,6 @@ coverage OPEN='':
     open target/debug/coverage/index.html
   end
 
-bench OPEN='':
-  #!/usr/bin/env fish
-  cargo criterion
-  if string match -r 'open$' -- '{{OPEN}}'
-    open target/criterion/reports/index.html
-  end
-
 doc OPEN='':
   #!/usr/bin/env fish
   if string match -r 'open$' -- '{{OPEN}}'

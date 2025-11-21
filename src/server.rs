@@ -1,10 +1,14 @@
-pub use crate::{audio_caps::AudioCaps, messages::NetworkMessage, udp_server::UdpServer};
-use crate::{StreamConfig, SERVER_TIMEOUT};
+use crate::{
+    audio_caps::AudioCaps, messages::NetworkMessage, udp_server::UdpServer, StreamConfig,
+    SERVER_TIMEOUT,
+};
 use anyhow::Context;
 use env_logger::Env;
 use flume::Sender;
 use futures::{future::join_all, SinkExt, StreamExt};
 use log::{error, info, LevelFilter};
+#[cfg(feature = "metrics")]
+use metrics_exporter_tcp::TcpBuilder;
 use rmp_serde::to_vec;
 use std::{
     collections::HashMap,
@@ -174,7 +178,7 @@ impl Server {
             // cpal::Stream is !Send so we must use a dedicated thread for the UdpServer
             let rt = Runtime::new().unwrap();
             rt.block_on(async {
-                UdpServer::send_audio(
+                match UdpServer::send_audio(
                     local_udp_socket,
                     remote_udp_addr,
                     input_device,
@@ -183,8 +187,10 @@ impl Server {
                     cancel_token_clone,
                 )
                 .await
-                .ok();
-                // TODO(john): Output errors and device_id to channel
+                {
+                    Ok(_) => {}
+                    Err(e) => error!("Error in UDP send audio task - {}", e),
+                }
             });
         });
 
@@ -256,7 +262,7 @@ impl Server {
             // cpal::Stream is !Send so we must use a dedicated thread for the UdpServer
             let rt = Runtime::new().unwrap();
             rt.block_on(async {
-                UdpServer::receive_audio(
+                match UdpServer::receive_audio(
                     local_udp_socket,
                     output_device,
                     output_device_cfg_clone,
@@ -264,8 +270,10 @@ impl Server {
                     cancel_token_clone,
                 )
                 .await
-                .ok();
-                // TODO(john): Output errors and device_id to channel
+                {
+                    Ok(_) => {}
+                    Err(e) => error!("Error in UDP receive audio task - {}", e),
+                }
             });
         });
 
@@ -364,6 +372,16 @@ impl Server {
     pub async fn listen(&self, local_addr: &SocketAddr) -> anyhow::Result<()> {
         let (sender, receiver) = flume::unbounded::<String>();
         let listener = TcpListener::bind(local_addr).await?;
+
+        #[cfg(feature = "metrics")]
+        {
+            let metrics_builder = TcpBuilder::new().listen_address(METRICS_SERVER_SOCKADDR);
+
+            metrics_builder.install().context(format!(
+                "Unable to start metrics collection on {}",
+                METRICS_SERVER_SOCKADDR
+            ))?;
+        }
 
         info!("Server listening on {}", local_addr);
 

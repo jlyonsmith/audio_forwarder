@@ -1,11 +1,16 @@
+#[cfg(feature = "metrics")]
+use crate::METRICS_CLIENT_SOCKADDR;
 use crate::{
     audio_caps::AudioCaps, messages::NetworkMessage, stream_config::StreamConfig,
     udp_server::UdpServer, DeviceConfig, DeviceDirection, SERVER_TIMEOUT,
 };
 use anyhow::{bail, Context};
+use cpal::SampleFormat;
 use env_logger::Env;
 use futures::{SinkExt, StreamExt};
 use log::{error, info, LevelFilter};
+#[cfg(feature = "metrics")]
+use metrics_exporter_tcp::TcpBuilder;
 use rmp_serde::to_vec;
 use std::net::SocketAddr;
 use tokio::{
@@ -29,7 +34,19 @@ impl Client {
         Client {}
     }
 
+    pub fn list_explanation() {
+        println!("NOTE: The list of audio devices is filtered to:");
+        println!();
+        println!("- Input devices with mono or stereo channel support.");
+        println!("- Output devices with stereo channel support.");
+        println!("- A sample format of f32 or i32.");
+        println!();
+        println!("1 channel input devices will be upmixed to stereo when sending audio.");
+        println!();
+    }
+
     pub fn list() -> anyhow::Result<()> {
+        Self::list_explanation();
         println!("{}", AudioCaps::get_device_list_string()?);
         Ok(())
     }
@@ -49,6 +66,7 @@ impl Client {
 
             match message {
                 NetworkMessage::ListResponse { output } => {
+                    Self::list_explanation();
                     print!("{}", output);
                 }
                 _ => bail!("Unexpected response from remote"),
@@ -68,6 +86,16 @@ impl Client {
         input_device: &Option<String>,
         input_stream_config: &Option<StreamConfig>,
     ) -> anyhow::Result<()> {
+        #[cfg(feature = "metrics")]
+        {
+            let metrics_builder = TcpBuilder::new().listen_address(METRICS_CLIENT_SOCKADDR);
+
+            metrics_builder.install().context(format!(
+                "Unable to start metrics collection on {}",
+                METRICS_CLIENT_SOCKADDR
+            ))?;
+        }
+
         let (output_device, output_device_cfg, buffer_frames) =
             AudioCaps::get_output_device(output_host, output_device, output_stream_config)?;
         let socket = TcpStream::connect(remote_addr).await?;
@@ -81,6 +109,15 @@ impl Client {
             stream_cfg: input_stream_config.as_ref().map(|x| x.to_string()),
             udp_addr: udp_socket.local_addr()?.to_string(),
         };
+
+        if output_device_cfg.stream_cfg.channels != 2
+            || (output_device_cfg.stream_cfg.sample_format != SampleFormat::F32
+                && output_device_cfg.stream_cfg.sample_format != SampleFormat::I32)
+        {
+            return Err(anyhow::anyhow!(
+                "Local output device must be stereo and use f32 or i32 sample format"
+            ));
+        }
 
         info!("Actual local output device is {}", output_device_cfg);
 
@@ -111,6 +148,15 @@ impl Client {
                     device_name: actual_remote_device,
                     stream_cfg: actual_remote_config.parse()?,
                 };
+
+                if input_device_cfg.stream_cfg.channels > 2
+                    || (input_device_cfg.stream_cfg.sample_format != SampleFormat::F32
+                        && input_device_cfg.stream_cfg.sample_format != SampleFormat::I32)
+                {
+                    return Err(anyhow::anyhow!(
+                        "Remote input device must be mono or stereo and use f32 or i32 sample format"
+                    ));
+                }
 
                 info!("Actual local input device is {}", input_device_cfg,);
 
@@ -168,6 +214,16 @@ impl Client {
         output_device: &Option<String>,
         output_config: &Option<StreamConfig>,
     ) -> anyhow::Result<()> {
+        #[cfg(feature = "metrics")]
+        {
+            let metrics_builder = TcpBuilder::new().listen_address(METRICS_CLIENT_SOCKADDR);
+
+            metrics_builder.install().context(format!(
+                "Unable to start metrics collection on {}",
+                METRICS_CLIENT_SOCKADDR
+            ))?;
+        }
+
         let (input_device, input_device_cfg, buffer_frames) =
             AudioCaps::get_input_device(input_host, input_device, input_config)?;
         let stream = TcpStream::connect(remote_addr).await?;
@@ -178,6 +234,15 @@ impl Client {
             device: output_device.clone(),
             stream_cfg: output_config.as_ref().map(|x| x.to_string()),
         };
+
+        if input_device_cfg.stream_cfg.channels > 2
+            || (input_device_cfg.stream_cfg.sample_format != SampleFormat::F32
+                && input_device_cfg.stream_cfg.sample_format != SampleFormat::I32)
+        {
+            return Err(anyhow::anyhow!(
+                "Local input device must be mono or stereo and use f32 or i32 sample format"
+            ));
+        }
 
         info!("Actual local input device is {}", input_device_cfg);
 
@@ -204,6 +269,15 @@ impl Client {
                         stream_cfg: actual_remote_config.parse()?,
                     };
                     let remote_udp_addr: SocketAddr = udp_addr.parse()?;
+
+                    if output_device_cfg.stream_cfg.channels != 2
+                        || (output_device_cfg.stream_cfg.sample_format != SampleFormat::F32
+                            && output_device_cfg.stream_cfg.sample_format != SampleFormat::I32)
+                    {
+                        return Err(anyhow::anyhow!(
+                            "Remote output device must be stereo and use f32 or i32 sample format"
+                        ));
+                    }
 
                     info!("Actual remote output device is {}", output_device_cfg);
 

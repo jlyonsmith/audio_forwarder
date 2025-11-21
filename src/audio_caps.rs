@@ -145,30 +145,30 @@ impl AudioCaps {
 
     pub fn get_device_list_string() -> anyhow::Result<String> {
         fn format_config(
-            config: &SupportedStreamConfigRange,
-            default_config: &Option<SupportedStreamConfig>,
+            stream_cfg: &SupportedStreamConfigRange,
+            default_stream_cfg: &Option<SupportedStreamConfig>,
         ) -> String {
             format!(
                 "\"{}x{}x{}\"{}",
-                config.channels(),
-                if config.min_sample_rate() == config.max_sample_rate() {
+                stream_cfg.channels(),
+                if stream_cfg.min_sample_rate() == stream_cfg.max_sample_rate() {
                     format!(
                         "{}",
-                        StreamConfig::format_as_khz(config.max_sample_rate().0)
+                        StreamConfig::format_as_khz(stream_cfg.max_sample_rate().0)
                     )
                 } else {
                     format!(
                         "{}-{}",
-                        StreamConfig::format_as_khz(config.min_sample_rate().0),
-                        StreamConfig::format_as_khz(config.max_sample_rate().0)
+                        StreamConfig::format_as_khz(stream_cfg.min_sample_rate().0),
+                        StreamConfig::format_as_khz(stream_cfg.max_sample_rate().0)
                     )
                 },
-                config.sample_format().to_string(),
-                if let Some(default_config) = default_config {
-                    if default_config.channels() == config.channels()
-                        && default_config.sample_rate() >= config.min_sample_rate()
-                        && default_config.sample_rate() <= config.max_sample_rate()
-                        && default_config.sample_format() == config.sample_format()
+                stream_cfg.sample_format().to_string(),
+                if let Some(default_stream_cfg) = default_stream_cfg {
+                    if default_stream_cfg.channels() == stream_cfg.channels()
+                        && default_stream_cfg.sample_rate() >= stream_cfg.min_sample_rate()
+                        && default_stream_cfg.sample_rate() <= stream_cfg.max_sample_rate()
+                        && default_stream_cfg.sample_format() == stream_cfg.sample_format()
                     {
                         " (default)"
                     } else {
@@ -218,42 +218,49 @@ impl AudioCaps {
                 )?;
 
                 // Input configs
-                let default_input_config = device.default_input_config().ok();
-                let input_configs = match device.supported_input_configs() {
-                    Ok(f) => f.collect(),
+                let default_input_stream_cfg = device.default_input_config().ok();
+                let input_stream_cfgs = match device.supported_input_configs() {
+                    Ok(f) => f
+                        .filter(|config| {
+                            (config.channels() == 1 || config.channels() == 2)
+                                && (config.sample_format() == cpal::SampleFormat::F32
+                                    || config.sample_format() == cpal::SampleFormat::I32)
+                        })
+                        .map(|config| format_config(&config, &default_input_stream_cfg))
+                        .collect::<Vec<String>>(),
                     Err(_) => Vec::new(),
                 };
                 writeln!(
                     output,
                     "    Input {}",
-                    if input_configs.is_empty() {
+                    if input_stream_cfgs.is_empty() {
                         "none".to_string()
                     } else {
-                        input_configs
-                            .into_iter()
-                            .map(|config| format_config(&config, &default_input_config))
-                            .collect::<Vec<String>>()
-                            .join(", ")
+                        input_stream_cfgs.join(", ")
                     }
                 )?;
 
                 // Output configs
-                let default_output_config = device.default_output_config().ok();
-                let output_configs = match device.supported_output_configs() {
-                    Ok(f) => f.collect(),
+                let default_output_stream_cfg = device.default_output_config().ok();
+                let output_stream_cfgs = match device.supported_output_configs() {
+                    Ok(f) => f
+                        .filter(|config| {
+                            config.channels() == 2
+                                && (config.sample_format() == cpal::SampleFormat::F32
+                                    || config.sample_format() == cpal::SampleFormat::I32)
+                        })
+                        .map(|config| format_config(&config, &default_output_stream_cfg))
+                        .collect::<Vec<String>>(),
                     Err(_) => Vec::new(),
                 };
+
                 writeln!(
                     output,
                     "    Output {}",
-                    if output_configs.is_empty() {
+                    if output_stream_cfgs.is_empty() {
                         "none".to_string()
                     } else {
-                        output_configs
-                            .into_iter()
-                            .map(|config| format_config(&config, &default_output_config))
-                            .collect::<Vec<String>>()
-                            .join(", ")
+                        output_stream_cfgs.join(", ")
                     }
                 )?;
             }
