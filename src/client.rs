@@ -90,7 +90,7 @@ impl Client {
             METRICS_CLIENT_SOCKADDR
         ))?;
 
-        let (output_device, output_device_cfg, buffer_frames) =
+        let (output_device, output_device_cfg) =
             AudioCaps::get_output_device(output_host, output_device, output_stream_config)?;
         let socket = TcpStream::connect(remote_addr).await?;
         let udp_socket = UdpSocket::bind("0.0.0.0:0")
@@ -164,7 +164,6 @@ impl Client {
                             udp_socket,
                             output_device,
                             output_device_cfg,
-                            buffer_frames,
                             cancel_token_clone,
                         )
                         .await
@@ -215,7 +214,7 @@ impl Client {
             METRICS_CLIENT_SOCKADDR
         ))?;
 
-        let (input_device, input_device_cfg, buffer_frames) =
+        let (input_device, input_device_cfg) =
             AudioCaps::get_input_device(input_host, input_device, input_config)?;
         let stream = TcpStream::connect(remote_addr).await?;
         let udp_socket = UdpSocket::bind("0.0.0.0:0").await?;
@@ -283,7 +282,6 @@ impl Client {
                                 remote_udp_addr,
                                 input_device,
                                 input_device_cfg,
-                                buffer_frames,
                                 cancel_token_clone,
                             )
                             .await

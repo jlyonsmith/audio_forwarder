@@ -21,7 +21,6 @@ impl UdpServer {
         sock_addr: SocketAddr,
         device: Device,
         device_cfg: DeviceConfig,
-        buffer_frames: u32,
         cancel_token: CancellationToken,
     ) -> Result<(), anyhow::Error> {
         if device_cfg.stream_cfg.channels != 1 && device_cfg.stream_cfg.channels != 2 {
@@ -37,7 +36,6 @@ impl UdpServer {
                     &sock_addr,
                     &device,
                     &device_cfg,
-                    buffer_frames,
                     cancel_token,
                 )
                 .await
@@ -48,7 +46,6 @@ impl UdpServer {
                     &sock_addr,
                     &device,
                     &device_cfg,
-                    buffer_frames,
                     cancel_token,
                 )
                 .await
@@ -64,7 +61,6 @@ impl UdpServer {
         sock_addr: &SocketAddr,
         device: &Device,
         device_cfg: &DeviceConfig,
-        buffer_frames: u32,
         cancel_token: CancellationToken,
     ) -> Result<(), anyhow::Error>
     where
@@ -134,7 +130,7 @@ impl UdpServer {
             &cpal::StreamConfig {
                 channels: device_cfg.stream_cfg.channels,
                 sample_rate: cpal::SampleRate(device_cfg.stream_cfg.sample_rate),
-                buffer_size: cpal::BufferSize::Fixed(buffer_frames),
+                buffer_size: cpal::BufferSize::Default,
             },
             move |input: &[T], _: &InputCallbackInfo| {
                 let mut audio_buffer = audio_buffer_clone.lock().unwrap();
@@ -236,7 +232,6 @@ impl UdpServer {
         socket: UdpSocket,
         device: Device,
         device_cfg: DeviceConfig,
-        buffer_frames: u32,
         cancel_token: CancellationToken,
     ) -> anyhow::Result<()> {
         if device_cfg.stream_cfg.channels != 2 {
@@ -247,24 +242,10 @@ impl UdpServer {
 
         match device_cfg.stream_cfg.sample_format {
             SampleFormat::F32 => {
-                Self::inner_receive_audio::<f32>(
-                    &socket,
-                    &device,
-                    &device_cfg,
-                    buffer_frames,
-                    cancel_token,
-                )
-                .await
+                Self::inner_receive_audio::<f32>(&socket, &device, &device_cfg, cancel_token).await
             }
             SampleFormat::U16 => {
-                Self::inner_receive_audio::<i32>(
-                    &socket,
-                    &device,
-                    &device_cfg,
-                    buffer_frames,
-                    cancel_token,
-                )
-                .await
+                Self::inner_receive_audio::<i32>(&socket, &device, &device_cfg, cancel_token).await
             }
             _ => Err(anyhow::anyhow!(
                 "Only f32 and i32 sample formats are supported on output device"
@@ -276,7 +257,6 @@ impl UdpServer {
         udp_socket: &UdpSocket,
         device: &Device,
         device_cfg: &DeviceConfig,
-        buffer_frames: u32,
         cancel_token: CancellationToken,
     ) -> anyhow::Result<()>
     where
@@ -290,7 +270,6 @@ impl UdpServer {
             &cpal::StreamConfig {
                 channels: device_cfg.stream_cfg.channels,
                 sample_rate: cpal::SampleRate(device_cfg.stream_cfg.sample_rate),
-                //buffer_size: cpal::BufferSize::Fixed(buffer_frames),
                 buffer_size: cpal::BufferSize::Default,
             },
             move |output: &mut [T], _: &OutputCallbackInfo| {

@@ -3,7 +3,7 @@ pub use crate::stream_config::StreamConfig;
 use anyhow::{anyhow, Context};
 use cpal::{
     traits::{DeviceTrait, HostTrait},
-    Device, SampleRate, SupportedBufferSize, SupportedStreamConfig, SupportedStreamConfigRange,
+    Device, SampleRate, SupportedStreamConfig, SupportedStreamConfigRange,
 };
 use std::fmt::Write;
 
@@ -14,7 +14,7 @@ impl AudioCaps {
         host_name: &str,
         device_name: &Option<String>,
         stream_cfg: &Option<StreamConfig>,
-    ) -> Result<(Device, DeviceConfig, u32), anyhow::Error> {
+    ) -> Result<(Device, DeviceConfig), anyhow::Error> {
         let available_hosts = cpal::available_hosts();
         let host_id = available_hosts
             .iter()
@@ -71,10 +71,6 @@ impl AudioCaps {
                     sample_format: config.sample_format(),
                 },
             },
-            match *config.buffer_size() {
-                SupportedBufferSize::Range { min, max: _ } => min,
-                SupportedBufferSize::Unknown => 1,
-            },
         ))
     }
 
@@ -82,7 +78,7 @@ impl AudioCaps {
         host: &str,
         device: &Option<String>,
         stream_cfg: &Option<StreamConfig>,
-    ) -> Result<(Device, DeviceConfig, u32), anyhow::Error> {
+    ) -> Result<(Device, DeviceConfig), anyhow::Error> {
         let available_hosts = cpal::available_hosts();
         let host_id = available_hosts
             .iter()
@@ -135,10 +131,6 @@ impl AudioCaps {
                     sample_rate: config.sample_rate().0,
                     sample_format: config.sample_format(),
                 },
-            },
-            match *config.buffer_size() {
-                SupportedBufferSize::Range { min, max: _ } => min,
-                SupportedBufferSize::Unknown => 1,
             },
         ))
     }

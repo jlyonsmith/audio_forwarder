@@ -149,7 +149,7 @@ impl Server {
         mut framed_stream: Framed<TcpStream, LengthDelimitedCodec>,
         sender: &Sender<String>,
     ) -> anyhow::Result<()> {
-        let (input_device, input_device_cfg, buffer_frames) = AudioCaps::get_input_device(
+        let (input_device, input_device_cfg) = AudioCaps::get_input_device(
             &host,
             &device,
             &stream_cfg.and_then(|s| StreamConfig::from_str(&s).ok()),
@@ -182,7 +182,6 @@ impl Server {
                     remote_udp_addr,
                     input_device,
                     input_device_cfg_clone,
-                    buffer_frames,
                     cancel_token_clone,
                 )
                 .await
@@ -233,7 +232,7 @@ impl Server {
         mut framed_stream: Framed<TcpStream, LengthDelimitedCodec>,
         sender: &Sender<String>,
     ) -> anyhow::Result<()> {
-        let (output_device, output_device_cfg, buffer_frames) = AudioCaps::get_output_device(
+        let (output_device, output_device_cfg) = AudioCaps::get_output_device(
             &host,
             &device,
             &config.and_then(|s| StreamConfig::from_str(&s).ok()),
@@ -265,7 +264,6 @@ impl Server {
                     local_udp_socket,
                     output_device,
                     output_device_cfg_clone,
-                    buffer_frames,
                     cancel_token_clone,
                 )
                 .await
