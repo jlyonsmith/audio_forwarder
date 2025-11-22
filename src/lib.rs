@@ -45,14 +45,8 @@ pub use crate::client::Client;
 pub use crate::device_config::{DeviceConfig, DeviceDirection};
 pub use crate::server::Server;
 pub use crate::stream_config::StreamConfig;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 // const MTU: usize = 65536;
 const MTU: usize = 1472;
 const SERVER_TIMEOUT: Duration = Duration::from_secs(5);
-
-static METRICS_SERVER_SOCKADDR: SocketAddr =
-    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 5555);
-static METRICS_CLIENT_SOCKADDR: SocketAddr =
-    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 5556);

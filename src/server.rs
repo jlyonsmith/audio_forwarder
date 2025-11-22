@@ -1,6 +1,6 @@
 use crate::{
     audio_caps::AudioCaps, messages::NetworkMessage, udp_server::UdpServer, StreamConfig,
-    METRICS_SERVER_SOCKADDR, SERVER_TIMEOUT,
+    SERVER_TIMEOUT,
 };
 use anyhow::Context;
 use env_logger::Env;
@@ -39,9 +39,22 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn new(log_level: LevelFilter) -> Server {
+    pub fn new(log_level: LevelFilter, metrics_addr: Option<SocketAddr>) -> Server {
         env_logger::Builder::from_env(Env::default().filter_or("RUST_LOG", log_level.to_string()))
             .init();
+
+        if let Some(metrics_addr) = metrics_addr {
+            let metrics_builder = TcpBuilder::new().listen_address(metrics_addr);
+
+            match metrics_builder.install() {
+                Ok(_) => info!("Metrics server started on {}", metrics_addr),
+                Err(e) => error!(
+                    "Unable to start metrics collection on {}: {}",
+                    metrics_addr, e
+                ),
+            };
+        }
+
         Server {
             connections: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -369,13 +382,6 @@ impl Server {
     pub async fn listen(&self, local_addr: &SocketAddr) -> anyhow::Result<()> {
         let (sender, receiver) = flume::unbounded::<String>();
         let listener = TcpListener::bind(local_addr).await?;
-
-        let metrics_builder = TcpBuilder::new().listen_address(METRICS_SERVER_SOCKADDR);
-
-        metrics_builder.install().context(format!(
-            "Unable to start metrics collection on {}",
-            METRICS_SERVER_SOCKADDR
-        ))?;
 
         info!("Server listening on {}", local_addr);
 

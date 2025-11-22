@@ -1,6 +1,6 @@
 use crate::{
     audio_caps::AudioCaps, messages::NetworkMessage, stream_config::StreamConfig,
-    udp_server::UdpServer, DeviceConfig, DeviceDirection, METRICS_CLIENT_SOCKADDR, SERVER_TIMEOUT,
+    udp_server::UdpServer, DeviceConfig, DeviceDirection, SERVER_TIMEOUT,
 };
 use anyhow::{bail, Context};
 use cpal::SampleFormat;
@@ -25,9 +25,22 @@ use tokio_util::{
 pub struct Client {}
 
 impl Client {
-    pub fn new(log_level: LevelFilter) -> Client {
+    pub fn new(log_level: LevelFilter, metrics_addr: Option<SocketAddr>) -> Client {
         env_logger::Builder::from_env(Env::default().filter_or("RUST_LOG", log_level.to_string()))
             .init();
+
+        if let Some(metrics_addr) = metrics_addr {
+            let metrics_builder = TcpBuilder::new().listen_address(metrics_addr);
+
+            match metrics_builder.install() {
+                Ok(_) => info!("Metrics server started on {}", metrics_addr),
+                Err(e) => error!(
+                    "Unable to start metrics collection on {}: {}",
+                    metrics_addr, e
+                ),
+            };
+        }
+
         Client {}
     }
 
@@ -83,13 +96,6 @@ impl Client {
         input_device: &Option<String>,
         input_stream_config: &Option<StreamConfig>,
     ) -> anyhow::Result<()> {
-        let metrics_builder = TcpBuilder::new().listen_address(METRICS_CLIENT_SOCKADDR);
-
-        metrics_builder.install().context(format!(
-            "Unable to start metrics collection on {}",
-            METRICS_CLIENT_SOCKADDR
-        ))?;
-
         let (output_device, output_device_cfg) =
             AudioCaps::get_output_device(output_host, output_device, output_stream_config)?;
         let socket = TcpStream::connect(remote_addr).await?;
@@ -207,13 +213,6 @@ impl Client {
         output_device: &Option<String>,
         output_config: &Option<StreamConfig>,
     ) -> anyhow::Result<()> {
-        let metrics_builder = TcpBuilder::new().listen_address(METRICS_CLIENT_SOCKADDR);
-
-        metrics_builder.install().context(format!(
-            "Unable to start metrics collection on {}",
-            METRICS_CLIENT_SOCKADDR
-        ))?;
-
         let (input_device, input_device_cfg) =
             AudioCaps::get_input_device(input_host, input_device, input_config)?;
         let stream = TcpStream::connect(remote_addr).await?;

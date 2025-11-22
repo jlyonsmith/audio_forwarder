@@ -13,6 +13,10 @@ struct AudioForwarderArgs {
     /// Set the logging level (e.g., info, debug, trace)
     #[arg(long = "log-level", default_value_t = LevelFilter::Info)]
     log_level: LevelFilter,
+
+    /// Enable metrics server
+    #[arg(long = "metrics-addr")]
+    metrics_addr: Option<SocketAddr>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -115,9 +119,10 @@ async fn main() {
         }
     };
     let log_level = args.log_level;
+    let metrics_addr = args.metrics_addr;
     let result = match args.command {
         Commands::Receive(receive_args) => {
-            Client::new(log_level)
+            Client::new(log_level, metrics_addr)
                 .receive(
                     &receive_args.sock_addr,
                     &receive_args.local_host,
@@ -130,7 +135,7 @@ async fn main() {
                 .await
         }
         Commands::Send(send_args) => {
-            Client::new(log_level)
+            Client::new(log_level, metrics_addr)
                 .send(
                     &send_args.sock_addr,
                     &send_args.local_host,
@@ -147,7 +152,9 @@ async fn main() {
             Client::list_remote(&list_remote_args.sock_addr).await
         }
         Commands::Listen(listen_args) => {
-            Server::new(log_level).listen(&listen_args.sock_addr).await
+            Server::new(log_level, metrics_addr)
+                .listen(&listen_args.sock_addr)
+                .await
         }
     };
 
