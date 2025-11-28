@@ -1,27 +1,33 @@
 //! This program allows you to forward audio from one device to another over the network.
-//! Audio can be either sent to an ouput device, e.g. speakers, or received from an input device,
-//! e.g. a microphone at either end of the connection.
+//! Audio can flow from a local input device to a remote output device, or from a remote input device
+//! to a local output device.  Input devices are typically microphones, and output devices are typically
+//! speakers.
 //!
-//! Audio transmission is done over UDP for performance and a separate TCP/IP connection is used
-//! as a control channel and to configure the audio stream.
+//! You can also list the available audio devices on the local and remote machines.
 //!
-//! To do this you must run one instance of the program in server mode. The one or more instances
-//! can connect to the server instance in client mode to send or receive audio. To start a server instance
+//!
+//! To do this you must run one instance of the program in server mode. Then one or more client instances
+//! can connect to this server instance to send or receive audio. To start a server instance
 //! use the `--listen` flag followed by the address and port to listen on, e.g. `0.0.0.0:12345`.
 //!
 //! The server is persistent and will continue to listen for incoming connections until it is stopped.
 //! You can run the server as a `systemd` service on Linux, provided that the user running the service
 //! has permission to access the audio devices.
 //!
-//! Client instances will then connect to the server instance to send or receive audio. Clients will
-//! remain connected until they are stopped, at which point they will disconnect from the server. This
-//! frees up audio devices on the server for other clients to use.
+//! Clients will remain connected until they are stopped, at which point they will disconnect from the server.
+//! This frees up servers audio devices for other clients to use.
 //!
-//! > Audio that is read from a 1-channel audio device will be written to the network as a 2-channel audio.
+//! ## Implementation Details
+//!
+//! Audio transmission is done over UDP for performance and a separate TCP/IP connection is used
+//! to controle and configure the audio stream.
+//!
+//! Audio that is input from a 1-channel audio device will be written to the network as a
+//! 2-channel audio.
 //!
 //! Network packets are always sent as 32-bit floating point values in the range of -1.0 to 1.0.
 //!
-//! Configurations are specified in the format `<channels>x<khz>x<format>`
+//! Audio stream configurations are specified in the format `<channels>x<khz>x<format>`
 //!
 //! - `channels` - The number of channels in the audio stream. For example, 1 or 2.
 //! - `khz` - The sample rate of the audio stream in kilohertz. For example, 44.1 or 48.
