@@ -1,0 +1,54 @@
+syntax = "proto3";
+
+package msg_schema;
+
+message Header {
+  oneof msg {
+    List list = 1;
+    ListResponse list_response = 2;
+    SendAudio send_audio = 3;
+    SendAudioResponse send_audio_response = 4;
+    ReceiveAudio receive_audio = 5;
+    ReceiveAudioResponse receive_audio_response = 6;
+  }
+}
+
+/// Request server to list available audio devices
+message List {}
+
+/// Response to List message
+message ListResponse { string output = 1; }
+
+/// Request server to read a local input audio device and send to a remote
+/// computer
+
+message SendAudio {
+  string host = 1;
+  optional string device = 2;
+  optional string stream_cfg = 3;
+  string udp_addr = 4;
+}
+
+/// Response to SendAudio message
+message SendAudioResponse {
+  string actual_host = 1;
+  string actual_device = 2;
+  string actual_stream_cfg = 3;
+}
+
+/// Request server to receive audio from a remote computer and send to local
+/// output audio device
+message ReceiveAudio {
+  string host = 1;
+  optional string device = 2;
+  optional string stream_cfg = 3;
+  string udp_addr = 4;
+}
+
+/// Response to ReceiveAudio message
+message ReceiveAudioResponse {
+  string actual_host = 1;
+  string actual_device = 2;
+  string actual_stream_cfg = 3;
+  string udp_addr = 4;
+}

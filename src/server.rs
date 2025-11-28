@@ -1,6 +1,11 @@
 use crate::{
-    audio_caps::AudioCaps, messages::NetworkMessage, udp_server::UdpServer, StreamConfig,
-    SERVER_TIMEOUT,
+    audio_caps::AudioCaps,
+    msg_schema::{
+        header::Msg as MsgType, Header, ListResponse, ReceiveAudioResponse, SendAudioResponse,
+    },
+    prost_codec::ProstCodec,
+    udp_server::UdpServer,
+    StreamConfig, SERVER_TIMEOUT,
 };
 use anyhow::Context;
 use env_logger::Env;
@@ -8,7 +13,6 @@ use flume::Sender;
 use futures::{future::join_all, SinkExt, StreamExt};
 use log::{error, info, LevelFilter};
 use metrics_exporter_tcp::TcpBuilder;
-use rmp_serde::to_vec;
 use std::{
     collections::HashMap,
     net::SocketAddr,
@@ -22,10 +26,7 @@ use tokio::{
     task::JoinHandle,
     time::timeout,
 };
-use tokio_util::{
-    codec::{Framed, LengthDelimitedCodec},
-    sync::CancellationToken,
-};
+use tokio_util::{codec::Framed, sync::CancellationToken};
 
 struct ConnectionInfo {
     remote_addr: SocketAddr,
@@ -61,7 +62,7 @@ impl Server {
     }
 
     async fn wait_for_stream_end(
-        framed_stream: &mut Framed<TcpStream, LengthDelimitedCodec>,
+        framed_stream: &mut Framed<TcpStream, ProstCodec<Header>>,
         device_id: String,
         cancel_token: CancellationToken,
         sender: Sender<String>,
@@ -138,16 +139,16 @@ impl Server {
 
     async fn handle_list_msg(
         &self,
-        mut framed_stream: Framed<TcpStream, LengthDelimitedCodec>,
+        mut framed_stream: Framed<TcpStream, ProstCodec<Header>>,
         remote_addr: &SocketAddr,
     ) -> anyhow::Result<()> {
         info!("Received device list message from {}", remote_addr);
         let output = AudioCaps::get_device_list_string().unwrap();
-        let list_remote_response_message = NetworkMessage::ListResponse { output };
+        let rsp_hdr = Header {
+            msg: Some(MsgType::ListResponse(ListResponse { output })),
+        };
 
-        framed_stream
-            .send(to_vec(&list_remote_response_message).unwrap().into())
-            .await?;
+        framed_stream.send(rsp_hdr).await?;
         Ok(())
     }
 
@@ -159,7 +160,7 @@ impl Server {
         remote_udp_addr: &SocketAddr,
         local_addr: &SocketAddr,
         remote_addr: &SocketAddr,
-        mut framed_stream: Framed<TcpStream, LengthDelimitedCodec>,
+        mut framed_stream: Framed<TcpStream, ProstCodec<Header>>,
         sender: &Sender<String>,
     ) -> anyhow::Result<()> {
         let (input_device, input_device_cfg) = AudioCaps::get_input_device(
@@ -174,13 +175,15 @@ impl Server {
         let local_udp_socket = UdpSocket::bind(SocketAddr::new(local_addr.ip(), 0))
             .await
             .context("Failed to bind a new UDP socket")?;
-        let message = NetworkMessage::SendAudioResponse {
-            actual_host: host,
-            actual_device: input_device_cfg.device_name.to_owned(),
-            actual_stream_cfg: input_device_cfg.stream_cfg.to_string(),
+        let rsp_hdr = Header {
+            msg: Some(MsgType::SendAudioResponse(SendAudioResponse {
+                actual_host: host,
+                actual_device: input_device_cfg.device_name.to_owned(),
+                actual_stream_cfg: input_device_cfg.stream_cfg.to_string(),
+            })),
         };
 
-        framed_stream.send(to_vec(&message)?.into()).await?;
+        framed_stream.send(rsp_hdr).await?;
 
         let cancel_token = CancellationToken::new();
         let cancel_token_clone = cancel_token.clone();
@@ -242,7 +245,7 @@ impl Server {
         config: Option<String>,
         local_addr: &SocketAddr,
         remote_addr: &SocketAddr,
-        mut framed_stream: Framed<TcpStream, LengthDelimitedCodec>,
+        mut framed_stream: Framed<TcpStream, ProstCodec<Header>>,
         sender: &Sender<String>,
     ) -> anyhow::Result<()> {
         let (output_device, output_device_cfg) = AudioCaps::get_output_device(
@@ -257,14 +260,16 @@ impl Server {
             .await
             .context("Failed to bind UDP socket")?;
         let local_udp_addr = local_udp_socket.local_addr()?;
-        let message = NetworkMessage::ReceiveAudioResponse {
-            actual_host: host,
-            actual_device: output_device_cfg.device_name.to_owned(),
-            actual_stream_cfg: output_device_cfg.stream_cfg.to_string(),
-            udp_addr: local_udp_addr.to_string(),
+        let rsp_hdr = Header {
+            msg: Some(MsgType::ReceiveAudioResponse(ReceiveAudioResponse {
+                actual_host: host,
+                actual_device: output_device_cfg.device_name.to_owned(),
+                actual_stream_cfg: output_device_cfg.stream_cfg.to_string(),
+                udp_addr: local_udp_addr.to_string(),
+            })),
         };
 
-        framed_stream.send(to_vec(&message)?.into()).await?;
+        framed_stream.send(rsp_hdr).await?;
 
         let cancel_token = CancellationToken::new();
         let cancel_token_clone = cancel_token.clone();
@@ -318,10 +323,10 @@ impl Server {
         remote_addr: &SocketAddr,
         sender: &Sender<String>,
     ) -> anyhow::Result<()> {
-        let mut framed_stream = Framed::new(stream, LengthDelimitedCodec::new());
+        let mut framed_stream = Framed::new(stream, ProstCodec::<Header>::new());
 
         // Process just one message from the stream
-        let frame = match timeout(SERVER_TIMEOUT, framed_stream.next()).await? {
+        let req_hdr = match timeout(SERVER_TIMEOUT, framed_stream.next()).await? {
             Some(result) => result?,
             None => {
                 return Err(anyhow::anyhow!(
@@ -331,26 +336,17 @@ impl Server {
             }
         };
 
-        // Deserialize the received bytes
-        let message = rmp_serde::from_slice::<NetworkMessage>(&frame)?;
-
-        // Match on the deserialized enum
-        match message {
-            NetworkMessage::List => self.handle_list_msg(framed_stream, remote_addr).await,
-            NetworkMessage::SendAudio {
-                host,
-                device,
-                stream_cfg,
-                udp_addr,
-            } => {
+        match req_hdr.msg {
+            Some(MsgType::List(_)) => self.handle_list_msg(framed_stream, remote_addr).await,
+            Some(MsgType::SendAudio(msg)) => {
                 // Use the same IP address as the TCP connection for the UDP address
-                let udp_addr: SocketAddr = udp_addr.parse()?;
+                let udp_addr: SocketAddr = msg.udp_addr.parse()?;
                 let remote_udp_addr = SocketAddr::new(remote_addr.ip(), udp_addr.port());
 
                 self.handle_send_msg(
-                    host,
-                    device,
-                    stream_cfg,
+                    msg.host,
+                    msg.device,
+                    msg.stream_cfg,
                     &remote_udp_addr,
                     local_addr,
                     remote_addr,
@@ -359,15 +355,11 @@ impl Server {
                 )
                 .await
             }
-            NetworkMessage::ReceiveAudio {
-                host,
-                device,
-                stream_cfg,
-            } => {
+            Some(MsgType::ReceiveAudio(msg)) => {
                 self.handle_receive_msg(
-                    host,
-                    device,
-                    stream_cfg,
+                    msg.host,
+                    msg.device,
+                    msg.stream_cfg,
                     local_addr,
                     remote_addr,
                     framed_stream,

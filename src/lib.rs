@@ -31,12 +31,14 @@
 //! is the number of bits per sample.  For example, f32 is a 32-bit floating point number, i16 is a 16-bit
 //! signed integer, u8 is an 8-bit unsigned integer.
 //!
-//! When listing the available audio devices, the format is `<channels>x<max-khz>x<format>`.
+//! When listing the available audio devices, the format is `<channels>x<min-khz>-<max-khz>x<format>`. When
+//! specifying a device configuration, you can use any single sample rate within the min-max range, e.g.
+//! `2x48xf32`.
 //!
 mod audio_caps;
 mod client;
 mod device_config;
-mod messages;
+mod prost_codec;
 mod server;
 mod stream_config;
 mod udp_server;
@@ -50,3 +52,7 @@ use std::time::Duration;
 // const MTU: usize = 65536;
 const MTU: usize = 1472;
 const SERVER_TIMEOUT: Duration = Duration::from_secs(5);
+
+pub mod msg_schema {
+    include!(concat!(env!("OUT_DIR"), "/msg_schema.rs"));
+}
