@@ -5,7 +5,6 @@
 //!
 //! You can also list the available audio devices on the local and remote machines.
 //!
-//!
 //! To do this you must run one instance of the program in server mode. Then one or more client instances
 //! can connect to this server instance to send or receive audio. To start a server instance
 //! use the `--listen` flag followed by the address and port to listen on, e.g. `0.0.0.0:12345`.
@@ -17,7 +16,10 @@
 //! Clients will remain connected until they are stopped, at which point they will disconnect from the server.
 //! This frees up servers audio devices for other clients to use.
 //!
-//! ## Implementation Details
+//! > Note that WiFi networks may introduce significant latency and packet loss, which can cause audio
+//! > glitches. For best performance use a wired Ethernet connection.
+//!
+//! # Implementation Details
 //!
 //! Audio transmission is done over UDP for performance and a separate TCP/IP connection is used
 //! to controle and configure the audio stream.
@@ -40,6 +42,15 @@
 //! When listing the available audio devices, the format is `<channels>x<min-khz>-<max-khz>x<format>`. When
 //! specifying a device configuration, you can use any single sample rate within the min-max range, e.g.
 //! `2x48xf32`.
+//!
+//! # Development
+//!
+//! The tool uses `prost` for Protocol Buffers support, `cpal` for audio device access, `tokio` for async
+//! networking and `tokio-util` for codec support.
+//!
+//! You'll need to have the Protocol Buffers compiler (`protoc`) installed to build the project from source.
+//! I recommend installing it via the [Protocol Buffers GitHub Releases](https://github.com/protocolbuffers/protobuf/releases)
+//! page as `prost` requires a specific version of `protoc`.
 //!
 mod audio_caps;
 mod client;
