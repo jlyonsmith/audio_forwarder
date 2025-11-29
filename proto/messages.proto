@@ -21,7 +21,6 @@ message ListResponse { string output = 1; }
 
 /// Request server to read a local input audio device and send to a remote
 /// computer
-
 message SendAudio {
   string host = 1;
   optional string device = 2;
@@ -42,7 +41,10 @@ message ReceiveAudio {
   string host = 1;
   optional string device = 2;
   optional string stream_cfg = 3;
-  string udp_addr = 4;
+  // Request specific UDP port to listen on for firewall/NAT purposes
+  uint32 udp_port = 5;
+
+  reserved 4;
 }
 
 /// Response to ReceiveAudio message

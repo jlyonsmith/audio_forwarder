@@ -1,6 +1,6 @@
 use crate::{
     audio_caps::AudioCaps,
-    msg_schema::{header::Msg as MsgType, Header, List, ReceiveAudio},
+    msg_schema::{header::Msg as MsgType, Header, List, ReceiveAudio, SendAudio},
     prost_codec::ProstCodec,
     stream_config::StreamConfig,
     udp_server::UdpServer,
@@ -116,7 +116,7 @@ impl Client {
             .context("Failed to bind UDP socket")?;
         let mut framed_stream = Framed::new(socket, ProstCodec::<Header>::new());
         let req_hdr = Header {
-            msg: Some(MsgType::ReceiveAudio(ReceiveAudio {
+            msg: Some(MsgType::SendAudio(SendAudio {
                 host: input_host.to_string(),
                 device: input_device.clone(),
                 stream_cfg: input_stream_config.as_ref().map(|x| x.to_string()),
@@ -209,6 +209,7 @@ impl Client {
         output_host: &str,
         output_device: &Option<String>,
         output_config: &Option<StreamConfig>,
+        server_udp_port: &Option<u16>,
     ) -> anyhow::Result<()> {
         let (input_device, input_device_cfg) =
             AudioCaps::get_input_device(input_host, input_device, input_config)?;
@@ -232,7 +233,7 @@ impl Client {
                 host: output_host.to_string(),
                 device: output_device.clone(),
                 stream_cfg: output_config.as_ref().map(|x| x.to_string()),
-                udp_addr: udp_socket.local_addr()?.to_string(),
+                udp_port: server_udp_port.unwrap_or_default() as u32,
             })),
         };
 

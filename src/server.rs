@@ -242,7 +242,8 @@ impl Server {
         &self,
         host: String,
         device: Option<String>,
-        config: Option<String>,
+        stream_cfg: Option<String>,
+        udp_port: u16,
         local_addr: &SocketAddr,
         remote_addr: &SocketAddr,
         mut framed_stream: Framed<TcpStream, ProstCodec<Header>>,
@@ -251,12 +252,12 @@ impl Server {
         let (output_device, output_device_cfg) = AudioCaps::get_output_device(
             &host,
             &device,
-            &config.and_then(|s| StreamConfig::from_str(&s).ok()),
+            &stream_cfg.and_then(|s| StreamConfig::from_str(&s).ok()),
         )?;
 
         self.remove_connection(&output_device_cfg.device_id()).await;
 
-        let local_udp_socket = UdpSocket::bind(SocketAddr::new(local_addr.ip(), 0))
+        let local_udp_socket = UdpSocket::bind(SocketAddr::new(local_addr.ip(), udp_port))
             .await
             .context("Failed to bind UDP socket")?;
         let local_udp_addr = local_udp_socket.local_addr()?;
@@ -360,6 +361,7 @@ impl Server {
                     msg.host,
                     msg.device,
                     msg.stream_cfg,
+                    msg.udp_port as u16,
                     local_addr,
                     remote_addr,
                     framed_stream,

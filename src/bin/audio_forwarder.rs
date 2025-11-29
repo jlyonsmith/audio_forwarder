@@ -93,6 +93,10 @@ struct SendArgs {
     /// The IP address and port of a remote computer to send audio to
     #[arg(long = "addr")]
     sock_addr: SocketAddr,
+
+    /// Request server to receive audio on this UDP port for firewall/NAT purposes
+    #[arg(long = "server-udp-port")]
+    server_udp_port: Option<u16>,
 }
 
 #[derive(Parser, Debug)]
@@ -144,6 +148,7 @@ async fn main() {
                     &send_args.remote_host,
                     &send_args.remote_device,
                     &send_args.remote_config,
+                    &send_args.server_udp_port,
                 )
                 .await
         }
