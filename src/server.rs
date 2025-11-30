@@ -243,7 +243,7 @@ impl Server {
         host: String,
         device: Option<String>,
         stream_cfg: Option<String>,
-        udp_port: u16,
+        firewall_udp_addr: Option<String>,
         local_addr: &SocketAddr,
         remote_addr: &SocketAddr,
         mut framed_stream: Framed<TcpStream, ProstCodec<Header>>,
@@ -257,6 +257,16 @@ impl Server {
 
         self.remove_connection(&output_device_cfg.device_id()).await;
 
+        let udp_port = if let Some(firewall_addr_str) = firewall_udp_addr {
+            let firewall_addr: SocketAddr = firewall_addr_str.parse()?;
+            info!(
+                "Matching local UDP port to firewall address {}",
+                firewall_addr
+            );
+            firewall_addr.port()
+        } else {
+            0
+        };
         let local_udp_socket = UdpSocket::bind(SocketAddr::new(local_addr.ip(), udp_port))
             .await
             .context("Failed to bind UDP socket")?;
@@ -361,7 +371,7 @@ impl Server {
                     msg.host,
                     msg.device,
                     msg.stream_cfg,
-                    msg.udp_port as u16,
+                    msg.firewall_udp_addr,
                     local_addr,
                     remote_addr,
                     framed_stream,

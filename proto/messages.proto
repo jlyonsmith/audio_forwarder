@@ -41,10 +41,9 @@ message ReceiveAudio {
   string host = 1;
   optional string device = 2;
   optional string stream_cfg = 3;
-  // Request specific UDP port to listen on for firewall/NAT purposes
-  uint32 udp_port = 5;
+  optional string firewall_udp_addr = 5;
 
-  reserved 4;
+  reserved 4; // previously udp_port
 }
 
 /// Response to ReceiveAudio message

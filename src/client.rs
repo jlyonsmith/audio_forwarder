@@ -209,7 +209,7 @@ impl Client {
         output_host: &str,
         output_device: &Option<String>,
         output_config: &Option<StreamConfig>,
-        server_udp_port: &Option<u16>,
+        firewall_udp_addr: &Option<SocketAddr>,
     ) -> anyhow::Result<()> {
         let (input_device, input_device_cfg) =
             AudioCaps::get_input_device(input_host, input_device, input_config)?;
@@ -233,7 +233,7 @@ impl Client {
                 host: output_host.to_string(),
                 device: output_device.clone(),
                 stream_cfg: output_config.as_ref().map(|x| x.to_string()),
-                udp_port: server_udp_port.unwrap_or_default() as u32,
+                firewall_udp_addr: firewall_udp_addr.as_ref().map(|x| x.to_string()),
             })),
         };
 
@@ -258,7 +258,11 @@ impl Client {
                     device_name: msg.actual_device,
                     stream_cfg: msg.actual_stream_cfg.parse()?,
                 };
-                let remote_udp_addr: SocketAddr = msg.udp_addr.parse()?;
+                let remote_udp_addr: SocketAddr = if firewall_udp_addr.is_some() {
+                    firewall_udp_addr.unwrap().clone()
+                } else {
+                    udp_socket.local_addr()?
+                };
 
                 if output_device_cfg.stream_cfg.channels != 2
                     || (output_device_cfg.stream_cfg.sample_format != SampleFormat::F32
