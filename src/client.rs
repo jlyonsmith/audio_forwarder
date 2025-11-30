@@ -259,9 +259,10 @@ impl Client {
                     stream_cfg: msg.actual_stream_cfg.parse()?,
                 };
                 let remote_udp_addr: SocketAddr = if firewall_udp_addr.is_some() {
+                    info!("Using firewall UDP address for remote");
                     firewall_udp_addr.unwrap().clone()
                 } else {
-                    udp_socket.local_addr()?
+                    msg.udp_addr.parse::<SocketAddr>()?
                 };
 
                 if output_device_cfg.stream_cfg.channels != 2

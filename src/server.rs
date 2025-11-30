@@ -259,10 +259,7 @@ impl Server {
 
         let udp_port = if let Some(firewall_addr_str) = firewall_udp_addr {
             let firewall_addr: SocketAddr = firewall_addr_str.parse()?;
-            info!(
-                "Matching local UDP port to firewall address {}",
-                firewall_addr
-            );
+            info!("Matching local UDP port to firewall address");
             firewall_addr.port()
         } else {
             0
