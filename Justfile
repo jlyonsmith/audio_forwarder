@@ -19,6 +19,18 @@ doc OPEN='':
     cargo doc
   end
 
+send-loop:
+  #!/usr/bin/env fish
+  cargo run -- send --local-host "CoreAudio" --local-device "Loopback Audio" --local-stream-cfg "2x48xf32"  --remote-host "ALSA" --remote-device "BossDAC" --remote-stream-cfg "2x48xf32" --addr 10.123.1.103:14100 --firewall-udp-addr 10.123.1.103:14101
+
+send-mic:
+  #!/usr/bin/env fish
+  cargo run -- send --local-host "CoreAudio" --local-device "Plantronics Blackwire 5220 Series" --local-stream-cfg "1x48xf32"  --remote-host "ALSA" --remote-device "BossDAC" --remote-stream-cfg "2x48xf32" --addr 10.123.1.103:14200 --firewall-udp-addr 10.123.1.103:14201
+
+recv-mic:
+  #!/usr/bin/env fish
+  cargo run -- receive --local-host "CoreAudio" --local-device "Plantronics Blackwire 5220 Series" --local-stream-cfg "2x48xf32"  --remote-host "ALSA" --remote-device "USB audio CODEC" --remote-stream-cfg "2x48xf32" --addr 10.123.1.103:14100
+
 readme:
   #!/usr/bin/env fish
   cargo rdme
